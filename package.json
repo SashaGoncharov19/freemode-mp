@@ -1,0 +1,9 @@
+{
+  "name": "entitymp",
+  "author": "SashaGoncharov19",
+  "scripts": {
+    "build": "cargo build --release --target x86_64-pc-windows-msvc",
+    "build:mac": "cargo build -p launcher -p client --release --target x86_64-pc-windows-gnu"
+  },
+  "private": false
+}
