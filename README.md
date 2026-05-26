@@ -1,3 +1,4 @@
+```md
 EntityMP/
 ├── Cargo.toml               # Root Workspace file uniting all Rust crates
 ├── client/                  # (DLL) Client-side library injected into the game
@@ -24,3 +25,4 @@ EntityMP/
 └── launcher/                # (EXE) Launcher tool to start the game and inject client.dll
 ├── Cargo.toml
 └── src/main.rs          # Spawns the game process and injects client.dll
+```
