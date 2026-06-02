@@ -164,7 +164,7 @@ impl ImportHook {
                 windows::Win32::Security::PAGE_EXECUTE_READWRITE,
                 &mut old_protect,
             );
-            if result.into_ok().is_ok() {
+            if result.is_ok() {
                 *self.iat_entry_ptr = self.original_addr;
                 // Flush instruction cache for the target module.
                 let _ = FlushInstructionCache(
@@ -307,7 +307,7 @@ pub fn hook_imports_in_module(
                 &mut old_protect,
             );
             
-            if result.into_ok().is_err() {
+            if result.is_err() {
                 return Err(format!("Failed to change protection on IAT entry for {}", function_name));
             }
             
@@ -557,7 +557,7 @@ pub fn enumerate_loaded_modules() -> std::result::Result<Vec<(String, usize)>, S
             ..std::mem::zeroed()
         };
 
-        if Module32First(snapshot, &mut me32).into_ok().is_ok() {
+        if Module32First(snapshot, &mut me32).is_ok() {
             loop {
                 let module_name = String::from_utf16_lossy(
                     &me32.szModule[..me32.szModule.iter().position(|&c| c == 0).unwrap_or(me32.szModule.len()) - 1]
@@ -571,7 +571,7 @@ pub fn enumerate_loaded_modules() -> std::result::Result<Vec<(String, usize)>, S
                     me32.modBaseAddr as usize,
                 ));
 
-                if !Module32Next(snapshot, &mut me32).into_ok().is_ok() {
+                if !Module32Next(snapshot, &mut me32).is_ok() {
                     break;
                 }
             }

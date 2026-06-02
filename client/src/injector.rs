@@ -239,7 +239,7 @@ pub fn inject_snapshot(_: std::ffi::OsString) -> Result<(*mut std::ffi::c_void, 
 #[cfg(windows)]
 pub fn install_veh_handler() -> usize {
     unsafe {
-        AddVectoredExceptionHandler(1, Some(snapshot_handler))
+        AddVectoredExceptionHandler(1, Some(snapshot_handler)) as usize
     }
 }
 
@@ -254,8 +254,8 @@ extern "system" fn snapshot_handler(exception_info: *mut EXCEPTION_POINTERS) -> 
     #[cfg(windows)]
     unsafe {
         let exc = (*(*exception_info).ExceptionRecord).ExceptionCode;
-        // EXCEPTION_BREAKPOINT = 0x80000003
-        if exc != 0x80000003u32 && exc != 0xC0000005u32 {
+        // EXCEPTION_BREAKPOINT = 0x80000003, check NTSTATUS value
+        if exc.0 != 0x80000003 && exc.0 != 0xC0000005 {
             return 0; // EXCEPTION_CONTINUE_SEARCH
         }
 
@@ -276,7 +276,7 @@ extern "system" fn snapshot_handler(exception_info: *mut EXCEPTION_POINTERS) -> 
         }
 
         (*(*exception_info).ContextRecord).ContextFlags = CONTEXT_ALL;
-        (*(*exception_info).ContextRecord).Eip = exception_addr as u32;
+        (*(*exception_info).ContextRecord).Rip = exception_addr as u64;
         1 // EXCEPTION_CONTINUE_EXECUTION
     }
     #[cfg(not(windows))]
@@ -360,11 +360,7 @@ pub fn inject_dll_from_launcher_folder(_gta5_process: HANDLE) -> windows_core::R
             PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE,
             false,
             0, // Stub: would use GetProcessId()
-        );
-        
-        if process.is_null() {
-            return Err(windows_core::Error::from_win32());
-        }
+        )?;
         
         // Allocate memory in target process for path.
         let remote_path = VirtualAllocEx(
@@ -381,11 +377,11 @@ pub fn inject_dll_from_launcher_folder(_gta5_process: HANDLE) -> windows_core::R
         }
         
         // Create remote thread that calls LoadLibraryW.
-        let h_kernel32 = GetModuleHandleW(PCWSTR(b"kernel32.dll\0".as_ptr() as *const u16));
+        let h_kernel32 = GetModuleHandleW(PCWSTR(b"kernel32.dll\0".as_ptr() as *const u16))?;
         let load_library_addr = GetProcAddress(
             h_kernel32,
             windows_core::PCSTR(b"LoadLibraryW\0".as_ptr()),
-        );
+        )?;
         
         if load_library_addr.is_none() {
             let _ = VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
@@ -398,10 +394,10 @@ pub fn inject_dll_from_launcher_folder(_gta5_process: HANDLE) -> windows_core::R
             None,
             0,
             Some(std::mem::transmute(load_library_addr.unwrap())),
-            remote_path,
+            Some(remote_path as *const c_void),
             0,
             None,
-        );
+        )?;
         
         if thread.is_null() {
             let _ = VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
