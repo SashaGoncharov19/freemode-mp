@@ -17,8 +17,8 @@ const DEFAULT_EPIC_PATH: &str =
     "C:\\Program Files (x86)\\Ep\\Games\\Grand Theft Auto V";
 
 /// Default Rockstar Games Launcher path for GTA V.
-const DEFAULT_RSG_PATH:
-    = "C:\\Program Files\\Rockstar Games\\Games\\GTA V";
+const DEFAULT_RSG_PATH: &str =
+    "C:\\Program Files\\Rockstar Games\\Games\\GTA V";
 
 // ============================================================================
 // Game build information

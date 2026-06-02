@@ -138,18 +138,14 @@ fn start_server(server: &mut FreeModeServer) -> Result<(), String> {
 
     println!("[SCRIPT] Looking for scripts in: {}", js_host_path);
     
-    // Try to load scripts using the ScriptLoader API.
-    if let Ok(mut loader) = script_loader::ScriptLoader::try_new(&js_host_path) {
-        if let Ok(count) = loader.load_scripts() {
-            println!("[SCRIPT] Loaded {} scripts from folder", count);
-        } else {
-            println!("[SCRIPT] No valid scripts found at '{}'", js_host_path);
-        }
-    } else {
-        println!("[SCRIPT] Resources folder not found: '{}'", js_host_path);
+    // Try to load scripts using the script_loader module's free function API.
+    let mut temp_js_host = js_host::JsHost::new();
+    match script_loader::load_all_scripts(&mut temp_js_host, &js_host_path) {
+        Ok(resources) => println!("[SCRIPT] Loaded {} resources from folder", resources.len()),
+        Err(e) => println!("[SCRIPT] No valid scripts found at '{}': {}", js_host_path, e),
     }
 
-    // 5. Initialize the JS host with QuickJS runtime.
+    // 5. Initialize the JS host with QuickJS runtime (copy loaded scripts).
     let mut js_host = js_host::JsHost::new();
     
     // List scripts using the public API.
