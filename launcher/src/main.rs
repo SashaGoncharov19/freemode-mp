@@ -42,7 +42,7 @@ fn main() {
             // Get build info for this GTA5 version.
             let build_info = game_path::get_game_build(&gta5_exe);
             if let Some(ref bi) = build_info {
-                freemode_log::info!("Game build detected: {} (build {})", bi.game_version, bi.build_number);
+                freemode_log::info!("Game build detected: {} (build {})", bi.file_version, bi.build_number);
             } else {
                 freemode_log::warn!("Could not determine game build — using defaults");
             }
@@ -117,9 +117,6 @@ impl Config {
         let config_path = config_file_path();
 
         if let Some(value) = freemode_log::read_config_json(&config_path) {
-            if let Ok(game_path) = value.get("game_path") {
-                // Parse successfully.
-            }
             return serde_json::from_value(value).unwrap_or_else(|_| Self::default());
         }
 
@@ -194,8 +191,8 @@ pub fn file_sha256(path: &Path) -> Option<Vec<u8>> {
 
     match std::fs::read(path) {
         Ok(contents) => {
-            let mut hasher = crypto::sha256::Sha256Hasher::new();
-            Some(hasher.compute(&contents))
+            let hasher = freemode_sdk::crypto::RawSha256Hasher::new();
+            Some(hasher.compute(&contents).to_vec())
         }
         Err(e) => {
             freemode_log::error!("Failed to read file for hash: {}: {}", path.display(), e);

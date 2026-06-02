@@ -21,6 +21,15 @@ pub struct LogEntry {
     pub message: String,
 }
 
+impl LogEntry {
+    fn as_str(&self) -> &'static str {
+        self.level.as_str()
+    }
+    fn css_color(&self) -> &str {
+        self.level.css_color()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel { Info, Warn, Error, Success }
 
