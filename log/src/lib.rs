@@ -73,7 +73,7 @@ impl FileLogger {
         if self.file.is_none() { let _ = self.open_file(); }
         let entry = format!("[{}] [{}] {}\n", timestamp, level.tag(), message);
         eprint!("{}", entry);
-        if let Some(ref file) = self.file {
+        if let Some(ref mut file) = self.file {
             let _ = file.write_all(entry.as_bytes());
         }
     }
