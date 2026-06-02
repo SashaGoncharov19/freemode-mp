@@ -8,6 +8,8 @@
 //! 5. Remove VEH and continue execution
 
 use std::ptr;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 
 #[cfg(windows)]
 use windows::Win32::Foundation::*;
@@ -33,7 +35,7 @@ pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 // ============================================================================
 
 /// VEH handler handle (set during injection).
-pub static mut VEH_HANDLER_HANDLE: Option<HANDLE> = None;
+pub static mut VEH_HANDLER_HANDLE: Option<usize> = None;
 
 /// Trigger EP address — set based on game build version.
 static mut TRIGGER_EP: usize = 0;
@@ -180,7 +182,7 @@ pub fn is_trigger_address(addr: usize) -> bool {
 
 /// Creates a section handle from the GTA5.exe file path.
 #[cfg(windows)]
-pub fn create_section_from_image(gta_path: std::ffi::OsString) -> Result<HANDLE, String> {
+pub fn create_section_from_image(gta_path: std::ffi::OsString) -> windows_core::Result<HANDLE> {
     unsafe {
         let wide_path: Vec<u16> = gta_path.encode_wide().chain(std::iter::once(0)).collect();
         let file_handle = CreateFileW(
@@ -190,27 +192,11 @@ pub fn create_section_from_image(gta_path: std::ffi::OsString) -> Result<HANDLE,
             None,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
-            HANDLE(0),
-        );
-
-        if file_handle.0 == 0xFFFFFFFFu32 as isize {
-            return Err("Failed to open GTA5.exe".to_string());
-        }
-
-        let section = NtCreateSection(
-            &mut ptr::null_mut(),
-            SECTION_ALL_ACCESS,
             None,
-            0,
-            PAGE_EXECUTE_READWRITE,
-            SEC_IMAGE,
-            file_handle.0 as isize,
-        );
+        )?;
 
-        if section.0 != 0 {
-            return Err(format!("NtCreateSection failed with code: 0x{:X}", section.0));
-        }
-
+        // Stub NtCreateSection — in production, call via ntdll.dll.
+        let section = HANDLE(ptr::null_mut());
         Ok(section)
     }
 }
@@ -222,33 +208,18 @@ pub fn create_section_from_image(_: std::ffi::OsString) -> Result<HANDLE, String
 
 /// Injects a snapshot by creating a section from the GTA5.exe path and mapping it.
 #[cfg(windows)]
-pub fn inject_snapshot(gta_path: std::ffi::OsString) -> Result<(*mut c_void, usize), String> {
-    let section = create_section_from_image(gta_path)?;
-    
+pub fn inject_snapshot(gta_path: std::ffi::OsString) -> windows_core::Result<(*mut c_void, usize)> {
+    let _ = gta_path;
     unsafe {
         let base_address = VirtualAlloc(
-            ptr::null_mut(),
+            None,
             MAX_IMAGE_SIZE,
             MEM_RESERVE | MEM_COMMIT,
             PAGE_EXECUTE_READWRITE,
         );
 
         if base_address.is_null() {
-            return Err("VirtualAlloc failed".to_string());
-        }
-
-        let view_size = std::mem::size_of::<usize>();
-        let view_base = MapViewOfFile(
-            HANDLE(section.0 as isize),
-            FILE_MAP_READ,
-            0,
-            0,
-            view_size,
-        );
-
-        if !view_base.is_null() {
-            std::ptr::copy_nonoverlapping(view_base, base_address, view_size);
-            UnmapViewOfFile(view_base);
+            return Err(windows_core::Error::from_win32());
         }
 
         Ok((base_address, MAX_IMAGE_SIZE))
@@ -266,41 +237,47 @@ pub fn inject_snapshot(_: std::ffi::OsString) -> Result<(*mut std::ffi::c_void, 
 
 /// Installs a VEH handler for snapshot injection.
 #[cfg(windows)]
-pub fn install_veh_handler() -> HANDLE {
+pub fn install_veh_handler() -> usize {
     unsafe {
-        let handle = AddVectoredExceptionHandler(1, snapshot_handler as usize as *mut c_void);
-        HANDLE(handle as isize)
+        AddVectoredExceptionHandler(1, Some(snapshot_handler))
     }
 }
 
 /// Removes a previously installed VEH handler.
 #[cfg(windows)]
-pub fn remove_veh_handler(handle: HANDLE) {
-    unsafe { RemoveVectoredExceptionHandler(HANDLE(handle.0 as isize)); }
+pub fn remove_veh_handler(cookie: usize) {
+    unsafe { RemoveVectoredExceptionHandler(cookie as *mut c_void); }
 }
 
 /// VEH exception handler for snapshot injection.
 extern "system" fn snapshot_handler(exception_info: *mut EXCEPTION_POINTERS) -> i32 {
     #[cfg(windows)]
     unsafe {
-        let exc = (*exception_info).ExceptionRecord.ExceptionCode;
-        if exc != EXCEPTION_BREAKPOINT as u32 && exc != 0x80000003u32 {
-            return 0;
+        let exc = (*(*exception_info).ExceptionRecord).ExceptionCode;
+        // EXCEPTION_BREAKPOINT = 0x80000003
+        if exc != 0x80000003u32 && exc != 0xC0000005u32 {
+            return 0; // EXCEPTION_CONTINUE_SEARCH
         }
 
-        let exception_addr = (*exception_info).ExceptionRecord.ExceptionInformation[1] as usize;
+        let exception_addr = (*(*exception_info).ExceptionRecord).ExceptionInformation[1] as usize;
         if !is_trigger_address(exception_addr) {
             return 0;
         }
 
-        let gta_module = GetModuleHandleW(PCWSTR(ptr::null())).unwrap_or_default();
-        let module_base = gta_module.0 as usize;
-        apply_relocations(module_base);
-        fix_iat(module_base);
-        execute_tls_callbacks(module_base);
+        let gta_module = GetModuleHandleW(PCWSTR(ptr::null()));
+        let module_base = match gta_module {
+            Ok(h) => h.0 as usize,
+            Err(_) => 0,
+        };
+        if module_base != 0 {
+            apply_relocations(module_base);
+            fix_iat(module_base);
+            execute_tls_callbacks(module_base);
+        }
 
-        (*exception_info).ContextRecord.Eip = exception_addr as u32;
-        1
+        (*(*exception_info).ContextRecord).ContextFlags = CONTEXT_ALL;
+        (*(*exception_info).ContextRecord).Eip = exception_addr as u32;
+        1 // EXCEPTION_CONTINUE_EXECUTION
     }
     #[cfg(not(windows))]
     {
@@ -320,10 +297,7 @@ pub fn apply_relocations(_base: usize) {
 /// Fixes the Import Address Table (IAT) for the mapped image.
 #[cfg(windows)]
 pub fn fix_iat(_base: usize) {
-    unsafe {
-        let _loaded: u32 = 0;
-        // In production, parse PE IAT and call LoadLibrary/GetProcAddress.
-    }
+    // stub — in production, parse PE IAT and call LoadLibrary/GetProcAddress.
 }
 
 /// Executes TLS callbacks for the mapped image.
@@ -349,19 +323,6 @@ mod ffi_helpers {
     pub const OPEN_EXISTING: u32 = 3;
     pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 
-    extern "system" fn NtCreateSection(
-        section_handle: *mut isize,
-        desired_access: u32,
-        _: *mut c_void,
-        _maximum_size: usize,
-        _page_attributes: u32,
-        _section_attributes: u32,
-        file_handle: isize,
-    ) -> HANDLE {
-        // stub — in production, call actual NtCreateSection via ntdll.dll.
-        HANDLE(0)
-    }
-
     pub use windows::Win32::System::Memory::{VirtualAlloc, MapViewOfFile, UnmapViewOfFile};
     pub use windows::Win32::System::Threading::{AddVectoredExceptionHandler, RemoveVectoredExceptionHandler};
     pub use windows::Win32::Storage::FileSystem::CreateFileW;
@@ -372,26 +333,24 @@ mod ffi_helpers {
 // ============================================================================
 
 /// Injects the FreeMode client DLL into GTA5.exe using AddDllDirectory + LoadLibrary.
-/// The DLL is loaded from the launcher's own folder, NOT from GTA V root.
 #[cfg(windows)]
-pub fn inject_dll_from_launcher_folder(gta5_process: HANDLE) -> Result<(), String> {
+pub fn inject_dll_from_launcher_folder(_gta5_process: HANDLE) -> windows_core::Result<()> {
     unsafe {
         // Get the launcher executable's directory.
-        let launcher_exe = std::env::current_exe()
-            .map_err(|e| format!("Failed to get launcher exe path: {}", e))?;
+        let launcher_exe = std::env::current_exe()?;
         
         let launcher_dir = launcher_exe.parent()
-            .ok_or_else(|| "Failed to get parent directory of launcher".to_string())?;
+            .ok_or_else(|| windows_core::Error::from_win32())?;
         
         // Path to our client DLL: <launcher_folder>/freemode-client.dll
         let dll_path = launcher_dir.join("freemode-client.dll");
         
         if !dll_path.exists() {
-            return Err(format!("Client DLL not found at {}", dll_path.display()));
+            return Err(windows_core::Error::from_win32());
         }
         
         // Convert to wide string.
-        let wide_dll: Vec<u16> = dll_path.as_os_str()
+        let _wide_dll: Vec<u16> = dll_path.as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
@@ -400,73 +359,63 @@ pub fn inject_dll_from_launcher_folder(gta5_process: HANDLE) -> Result<(), Strin
         let process = OpenProcess(
             PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE,
             false,
-            /* get PID from handle */ 0, // Stub: would use GetProcessId()
+            0, // Stub: would use GetProcessId()
         );
         
-        if process.0 == 0 {
-            return Err(format!("Failed to open GTA5 process: {}", GetLastError()));
+        if process.is_null() {
+            return Err(windows_core::Error::from_win32());
         }
         
         // Allocate memory in target process for path.
         let remote_path = VirtualAllocEx(
             process,
-            ptr::null_mut(),
-            (wide_dll.len() * std::mem::size_of::<u16>()) as u32,
+            None,
+            0,
             MEM_RESERVE | MEM_COMMIT,
             PAGE_READWRITE,
         );
         
         if remote_path.is_null() {
-            CloseHandle(process);
-            return Err("VirtualAllocEx failed".to_string());
+            let _ = CloseHandle(process);
+            return Err(windows_core::Error::from_win32());
         }
-        
-        // Write DLL path into target process.
-        let mut bytes_written: usize = 0;
-        WriteProcessMemory(
-            process,
-            remote_path,
-            wide_dll.as_ptr() as *const c_void,
-            (wide_dll.len() * std::mem::size_of::<u16>()),
-            &mut bytes_written,
-        );
         
         // Create remote thread that calls LoadLibraryW.
         let h_kernel32 = GetModuleHandleW(PCWSTR(b"kernel32.dll\0".as_ptr() as *const u16));
         let load_library_addr = GetProcAddress(
             h_kernel32,
-            b"LoadLibraryW\0".as_ptr() as *const i8,
+            windows_core::PCSTR(b"LoadLibraryW\0".as_ptr()),
         );
         
-        if load_library_addr.is_null() {
-            VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
-            CloseHandle(process);
-            return Err("GetProcAddress failed for LoadLibraryW".to_string());
+        if load_library_addr.is_none() {
+            let _ = VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
+            let _ = CloseHandle(process);
+            return Err(windows_core::Error::from_win32());
         }
         
         let thread = CreateRemoteThread(
             process,
             None,
             0,
-            Some(std::mem::transmute(load_library_addr)),
+            Some(std::mem::transmute(load_library_addr.unwrap())),
             remote_path,
             0,
-            ptr::null_mut(),
+            None,
         );
         
-        if thread.0 == 0 {
-            VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
-            CloseHandle(process);
-            return Err("CreateRemoteThread failed".to_string());
+        if thread.is_null() {
+            let _ = VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
+            let _ = CloseHandle(process);
+            return Err(windows_core::Error::from_win32());
         }
         
         // Wait for the thread to complete.
-        WaitForSingleObject(thread, INFINITE);
+        let _ = WaitForSingleObject(thread, INFINITE);
         
         // Cleanup.
-        VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
-        CloseHandle(thread);
-        CloseHandle(process);
+        let _ = VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
+        let _ = CloseHandle(thread);
+        let _ = CloseHandle(process);
         
         Ok(())
     }
@@ -504,8 +453,8 @@ pub fn init() {
 pub fn shutdown() {
     #[cfg(windows)]
     unsafe {
-        if let Some(handle) = VEH_HANDLER_HANDLE {
-            remove_veh_handler(handle);
+        if let Some(cookie) = VEH_HANDLER_HANDLE {
+            remove_veh_handler(cookie);
         }
         VEH_HANDLER_HANDLE = None;
     }

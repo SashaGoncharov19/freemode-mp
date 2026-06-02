@@ -215,13 +215,22 @@ impl ExecutableLoader {
     fn default_library_loader(name: &str) -> HMODULE {
         #[cfg(windows)]
         unsafe {
-            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-            LoadLibraryW(windows::Win32::Foundation::PCWSTR(wide.as_ptr()))
+            let wide: Vec<u16> = std::ffi::CString::new(name)
+                .map_err(|_| 0 as HMODULE)
+                .unwrap_or_default()
+                .as_bytes_with_nul()
+                .iter()
+                .copied()
+                .chain(std::iter::once(0))
+                .collect();
+            // Use PCSTR since we're dealing with ANSI bytes.
+            LoadLibraryA(windows_core::PCSTR(wide.as_ptr() as *const i8))
+                .unwrap_or_default()
         }
         #[cfg(not(windows))]
         {
             let _ = name;
-            HMODULE(0)
+            0 as HMODULE
         }
     }
     
@@ -229,8 +238,9 @@ impl ExecutableLoader {
     fn default_function_resolver(module: HMODULE, name: &str) -> LPVOID {
         #[cfg(windows)]
         unsafe {
-            let wide: Vec<u8> = name.bytes().chain(std::iter::once(0)).collect();
-            GetProcAddress(module, std::ffi::CStr::from_bytes_with_nul_unchecked(&wide))
+            let cstr = std::ffi::CString::new(name).unwrap_or_default();
+            GetProcAddress(module, windows_core::PCSTR(cstr.as_ptr()))
+                .unwrap_or(ptr::null_mut())
         }
         #[cfg(not(windows))]
         {
@@ -255,7 +265,7 @@ impl ExecutableLoader {
     where
         F: Fn(&str) -> HMODULE + 'static,
     {
-        self.library_loader = loader;
+        self.library_loader = move |s| loader(s);
     }
     
     /// Sets a custom function resolver callback.
@@ -267,7 +277,7 @@ impl ExecutableLoader {
     }
     
     /// Loads the executable into memory and applies relocations.
-    pub fn load_into_module(&mut self, target_module: HMODULE) -> bool {
+    pub fn load_into_module(&mut self, target_module: HMODULE) -> std::result::Result<bool, String> {
         #[cfg(windows)]
         unsafe {
             let base_addr = target_module.0 as usize;
@@ -275,29 +285,33 @@ impl ExecutableLoader {
             // Parse DOS header.
             let dos_header = *(base_addr as *const ImageDosHeader);
             if dos_header.e_magic != 0x5A4B {
-                return false; // Invalid MZ signature
+                return Ok(false); // Invalid MZ signature
             }
             
             // Get NT headers.
-            let nt_headers = ((base_addr + dos_header.e_lfanew as usize) as *const ImageNTHeaders64).as_ref()?;
+            let nt_headers_ptr = (base_addr + dos_header.e_lfanew as usize) as *const ImageNTHeaders64;
+            if nt_headers_ptr.is_null() {
+                return Ok(false);
+            }
+            let nt_headers = unsafe { *nt_headers_ptr };
             
             // Validate PE32+.
             if nt_headers.signature != [0x00, 0x00, 0x0b, 0x02] {
-                return false; // Not PE32+
+                return Ok(false); // Not PE32+
             }
             
             let opt_header = &nt_headers.optional_header;
             
             // Allocate memory for the executable.
             let alloc_addr = VirtualAlloc(
-                ptr::null_mut(),
+                None,
                 self.load_limit,
                 windows::Win32::System::Memory::MEM_RESERVE,
                 windows::Win32::Security::PAGE_READWRITE,
             );
             
             if alloc_addr.is_null() {
-                return false;
+                return Ok(false);
             }
             
             self.module = alloc_addr as *mut u8;
@@ -310,13 +324,13 @@ impl ExecutableLoader {
             );
             
             // Apply relocations.
-            if !self.apply_relocations(base_addr, nt_headers) {
-                return false;
+            if !self.apply_relocations(base_addr, &nt_headers)? {
+                return Ok(false);
             }
             
             // Resolve imports.
-            if !self.resolve_imports(base_addr, nt_headers) {
-                return false;
+            if !self.resolve_imports(base_addr, &nt_headers)? {
+                return Ok(false);
             }
             
             // Setup TLS callbacks.
@@ -328,24 +342,24 @@ impl ExecutableLoader {
             // Get entry point.
             self.entry_point = base_addr + opt_header.address_of_entry_point as usize;
             
-            true
+            Ok(true)
         }
         #[cfg(not(windows))]
         {
             let _ = target_module;
-            false
+            Ok(false)
         }
     }
     
     /// Applies base relocations to the loaded module.
-    fn apply_relocations(&self, base_addr: usize, nt_headers: &ImageNTHeaders64) -> bool {
+    fn apply_relocations(&self, base_addr: usize, nt_headers: &ImageNTHeaders64) -> std::result::Result<bool, String> {
         #[cfg(windows)]
         unsafe {
             let opt = &nt_headers.optional_header;
             let import_dir = opt.import_directory();
             
             if import_dir.size == 0 || import_dir.virtual_address == 0 {
-                return true; // No relocations
+                return Ok(true); // No relocations
             }
             
             // Find the section containing relocations.
@@ -356,7 +370,7 @@ impl ExecutableLoader {
             // Walk relocation entries.
             let reloc_dir = opt.data_directory[12]; // IMAGE_DIRECTORY_ENTRY_BASERELOC = 12
             if reloc_dir.size == 0 || reloc_dir.virtual_address == 0 {
-                return true;
+                return Ok(true);
             }
             
             // Find section containing relocations.
@@ -404,25 +418,25 @@ impl ExecutableLoader {
                 offset += block_size as usize;
             }
             
-            true
+            Ok(true)
         }
         #[cfg(not(windows))]
         {
             let _ = base_addr;
             let _ = nt_headers;
-            false
+            Ok(false)
         }
     }
     
     /// Resolves all imports for the loaded module.
-    fn resolve_imports(&self, base_addr: usize, nt_headers: &ImageNTHeaders64) -> bool {
+    fn resolve_imports(&self, base_addr: usize, nt_headers: &ImageNTHeaders64) -> std::result::Result<bool, String> {
         #[cfg(windows)]
         unsafe {
             let opt = &nt_headers.optional_header;
             let import_dir = opt.import_directory();
             
             if import_dir.size == 0 || import_dir.virtual_address == 0 {
-                return true;
+                return Ok(true);
             }
             
             // Find the section containing the import table.
@@ -469,11 +483,17 @@ impl ExecutableLoader {
                 }
                 
                 let mod_name = std::str::from_utf8(&mod_name_bytes)
-                    .ok()?;
+                    .map_err(|e| format!("Invalid module name: {}", e))?;
                 
                 // Load the module.
                 let loaded_module = (self.library_loader)(mod_name);
-                if loaded_module.0 == 0 {
+                #[cfg(windows)]
+                if loaded_module.is_null() {
+                    desc_idx += 1;
+                    continue;
+                }
+                #[cfg(not(windows))]
+                if loaded_module == 0 {
                     desc_idx += 1;
                     continue;
                 }
@@ -516,21 +536,21 @@ impl ExecutableLoader {
                 desc_idx += 1;
             }
             
-            Some(())
+            Ok(true)
         }
         #[cfg(not(windows))]
         {
             let _ = base_addr;
             let _ = nt_headers;
-            None
+            Ok(false)
         }
     }
     
     /// Sets up TLS callbacks.
-    fn setup_tls(&self, nt_headers: &ImageNTHeaders64) {
+    fn setup_tls(&self, _nt_headers: &ImageNTHeaders64) {
         #[cfg(windows)]
         unsafe {
-            let opt = &nt_headers.optional_header;
+            let opt = &_nt_headers.optional_header;
             let tls_dir = opt.data_directory[9]; // IMAGE_DIRECTORY_ENTRY_TLS = 9
             
             if tls_dir.size == 0 || tls_dir.virtual_address == 0 {
@@ -540,6 +560,7 @@ impl ExecutableLoader {
             // In production, walk TLS directory and call callbacks.
             let _ = tls_dir;
         }
+        let _ = self;
     }
     
     /// Swaps PE headers to make the module look legitimate.
@@ -565,19 +586,23 @@ impl ExecutableLoader {
     }
     
     /// Protects sections according to FiveM's RWX_TEST approach.
-    pub fn protect_sections(&self) {
+    pub fn protect_sections(&self) -> std::result::Result<(), String> {
         #[cfg(windows)]
         unsafe {
             if self.module.is_null() {
-                return;
+                return Ok(());
             }
             
             let dos_header = *(self.module as *const ImageDosHeader);
             if dos_header.e_magic != 0x5A4B {
-                return;
+                return Ok(());
             }
             
-            let nt_headers = ((self.module as usize + dos_header.e_lfanew as usize) as *const ImageNTHeaders64).as_ref()?;
+            let nt_headers_ptr = (self.module as usize + dos_header.e_lfanew as usize) as *const ImageNTHeaders64;
+            if nt_headers_ptr.is_null() {
+                return Ok(());
+            }
+            let nt_headers = unsafe { *nt_headers_ptr };
             let sections_ptr = ((self.module as usize + nt_headers.signature.len() + std::mem::size_of::<ImageFileHeader>()) as *const u8)
                 .cast::<ImageSectionHeader>();
             let num_sections = nt_headers.file_header.number_of_sections as usize;
@@ -605,6 +630,13 @@ impl ExecutableLoader {
                     &mut old_protect,
                 );
             }
+            
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = self;
+            Ok(())
         }
     }
 }

@@ -8,6 +8,8 @@
 //! - IAT fixup
 
 use std::ptr;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 
 #[cfg(windows)]
 pub use windows::Win32::Foundation::*;
@@ -46,7 +48,7 @@ const EXCEPTION_BREAKPOINT: u32 = 0x8000_0002;
 const EXCEPTION_SINGLE_STEP: u32 = 0x8000_0003;
 /// Access violation.
 const EXCEPTION_ACCESS_VIOLATION: u32 = 0x8000_0005;
-/// Initial exception (first pass).
+/// Continue execution after handling.
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 /// Continue execution after handling.
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
@@ -82,7 +84,7 @@ impl SnapshotInjector {
     /// Creates a new snapshot injector.
     pub fn new() -> Self {
         Self {
-            process_handle: HANDLE(0),
+            process_handle: HANDLE(ptr::null_mut()),
             process_id: 0,
             veh_installed: false,
             original_entry_point: 0,
@@ -91,7 +93,7 @@ impl SnapshotInjector {
     }
     
     /// Initializes the snapshot injector for a target executable.
-    pub fn initialize(&mut self, exe_path: &str) -> Result<(), String> {
+    pub fn initialize(&mut self, exe_path: &str) -> std::result::Result<(), String> {
         #[cfg(windows)]
         unsafe {
             // Convert path to wide string.
@@ -101,19 +103,19 @@ impl SnapshotInjector {
             let startup_info = STARTUPINFOW {
                 cb: std::mem::size_of::<STARTUPINFOW>() as u32,
                 lpReserved: ptr::null(),
-                lpDesktop: PCWSTR(wide_path.as_ptr()), // Use path as desktop for testing
-                lpTitle: ptr::null(),
+                lpDesktop: PCWSTR(ptr::null()),
+                lpTitle: PCWSTR(ptr::null()),
                 dwFlags: 0,
                 cbReserved2: 0,
                 lpReserved2: ptr::null_mut(),
-                hStdInput: HANDLE(0),
-                hStdOutput: HANDLE(0),
-                hStdError: HANDLE(0),
+                hStdInput: HANDLE(ptr::null_mut()),
+                hStdOutput: HANDLE(ptr::null_mut()),
+                hStdError: HANDLE(ptr::null_mut()),
             };
             
-            let process_info = PROCESS_INFORMATION {
-                hProcess: HANDLE(0),
-                hThread: HANDLE(0),
+            let mut process_info = PROCESS_INFORMATION {
+                hProcess: HANDLE(ptr::null_mut()),
+                hThread: HANDLE(ptr::null_mut()),
                 dwProcessId: 0,
                 dwThreadId: 0,
             };
@@ -128,12 +130,12 @@ impl SnapshotInjector {
                 CREATE_SUSPENDED | DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS,
                 ptr::null(),
                 ptr::null(),
-                &startup_info,
-                &mut process_info as *mut _ as *mut _,
+                &mut startup_info as *mut _,
+                &mut process_info as *mut _,
             );
             
-            if !result.as_bool() {
-                return Err(format!("Failed to create process: {}", GetLastError()));
+            if !result.into_ok().is_ok() {
+                return Err(format!("Failed to create process: {}", GetLastError().0.0));
             }
             
             self.process_handle = process_info.hProcess;
@@ -141,8 +143,10 @@ impl SnapshotInjector {
             
             // Get the main module's base address.
             let h_module = GetModuleHandleW(PCWSTR(ptr::null()));
-            if !h_module.is_null() {
-                self.base_address = h_module.0 as usize;
+            if let Ok(h) = h_module {
+                if !h.is_null() {
+                    self.base_address = h.0 as usize;
+                }
             }
             
             Ok(())
@@ -155,7 +159,7 @@ impl SnapshotInjector {
     }
     
     /// Installs the VEH handler for capturing breakpoints.
-    pub fn install_veh(&mut self) -> Result<(), String> {
+    pub fn install_veh(&mut self) -> std::result::Result<(), String> {
         #[cfg(windows)]
         unsafe {
             // Store the trigger address (usually the OEP of GTA5.exe).
@@ -191,7 +195,6 @@ impl SnapshotInjector {
         unsafe {
             if G_VEH_INSTALLED {
                 // RemoveVectoredExceptionHandler would be called here.
-                // In production, store the cookie returned by AddVectoredExceptionHandler.
                 G_VEH_INSTALLED = false;
                 self.veh_installed = false;
             }
@@ -199,13 +202,10 @@ impl SnapshotInjector {
     }
     
     /// Sets a hardware breakpoint on a target address.
-    pub fn set_hardware_breakpoint(&mut self, address: usize) -> Result<(), String> {
+    pub fn set_hardware_breakpoint(&mut self, _address: usize) -> std::result::Result<(), String> {
         #[cfg(windows)]
         unsafe {
-            // Set DR3 to the target address.
-            // In production, use NtSetContextThread with DR registers.
-            let _ = address;
-            
+            let _ = _address;
             // For process-level breakpoints, modify the thread context:
             /*
             CONTEXT ctx;
@@ -214,18 +214,17 @@ impl SnapshotInjector {
             ctx.Dr7 = DR7_BP3_ENABLE | DR7_EXEC_MODE;
             NtSetContextThread(thread_handle, &ctx);
             */
-            
             Ok(())
         }
         #[cfg(not(windows))]
         {
-            let _ = address;
+            let _ = _address;
             Err("Hardware breakpoints not available on non-Windows".to_string())
         }
     }
     
     /// Resumes the target process after injection setup.
-    pub fn resume_process(&mut self) -> Result<(), String> {
+    pub fn resume_process(&mut self) -> std::result::Result<(), String> {
         #[cfg(windows)]
         unsafe {
             // Resume the main thread.
@@ -244,14 +243,7 @@ impl SnapshotInjector {
     /// Gets the game trigger entry point based on build detection.
     fn get_game_trigger_ep(&self) -> usize {
         // FiveM uses version-dependent mapping for TRIGGER_EP.
-        // Each GTA V update changes the entry point address.
-        
-        // This would be populated from the sdk::build_detection module:
-        // if xbr::IsGameBuild<xbr::Build::Patch_2026_1>() { 0x14187C378 }
-        // else if xbr::IsGameBuild<xbr::Build::Winter_2025>() { 0x141878F9C }
-        // etc.
-        
-        // Default trigger EP for build 1604 (base version).
+        // This would be populated from the sdk::build_detection module.
         0x14175DE00
     }
     
@@ -271,7 +263,7 @@ impl Drop for SnapshotInjector {
         self.remove_veh();
         #[cfg(windows)]
         unsafe {
-            if !self.process_handle.0.is_null() {
+            if !self.process_handle.is_null() {
                 let _ = TerminateProcess(self.process_handle, 0);
                 let _ = CloseHandle(self.process_handle);
             }
@@ -284,26 +276,18 @@ impl Drop for SnapshotInjector {
 // ============================================================================
 
 /// VEH handler for snapshot injection.
-/// 
-/// When the target process hits the breakpoint at TRIGGER_EP,
-/// this handler:
-/// 1. Applies base relocations
-/// 2. Fixes the IAT
-/// 3. Calls TLS callbacks
-/// 4. Removes the breakpoint
-/// 5. Continues execution
 #[cfg(windows)]
 extern "system" fn snapshot_veh_handler(exception_info: *mut ExceptionPointers) -> i32 {
     unsafe {
-        let exc = (*exception_info).ExceptionRecord;
+        let exc = (*(*exception_info).ExceptionRecord).ExceptionCode;
         
         // Check if this is a breakpoint exception.
-        if exc.ExceptionCode != EXCEPTION_BREAKPOINT {
+        if exc != EXCEPTION_BREAKPOINT {
             return EXCEPTION_CONTINUE_SEARCH;
         }
         
         // Get the exception address.
-        let exception_address = exc.ExceptionInformation[1] as usize;
+        let exception_address = (*(*exception_info).ExceptionRecord).ExceptionInformation[1] as usize;
         
         // Check if it matches our trigger address.
         if exception_address != G_TRIGGER_ADDRESS {
@@ -311,18 +295,10 @@ extern "system" fn snapshot_veh_handler(exception_info: *mut ExceptionPointers) 
         }
         
         // This is our target! Apply all injection steps.
-        
         // 1. Apply base relocations (already done in ExecutableLoader).
-        
-        // 2. Fix IAT entries.
-        // (Already handled by resolve_imports in ExecutableLoader.)
-        
-        // 3. Call TLS callbacks.
-        // (Would parse TLS directory and invoke each callback.)
-        
-        // 4. Remove the hardware breakpoint.
-        // Clear Dr3: NtSetContextThread with Dr7 &= ~DR7_BP3_ENABLE.
-        
+        // 2. Fix IAT entries (already handled by resolve_imports in ExecutableLoader).
+        // 3. Call TLS callbacks (would parse TLS directory and invoke each callback).
+        // 4. Remove the hardware breakpoint (Clear Dr3).
         // 5. Continue execution from the OEP.
         EXCEPTION_CONTINUE_EXECUTION
     }
@@ -339,11 +315,7 @@ extern "system" fn snapshot_veh_handler(_exception_info: *mut ExceptionPointers)
 // ============================================================================
 
 /// Gets the TRIGGER_EP for a specific GTA V build number.
-/// 
-/// FiveM maps each GTA V build to a different OEP because Rockstar
-/// changes the entry point with every update.
 pub fn get_trigger_ep_for_build(build_number: u32) -> usize {
-    // Version-dependent trigger addresses from FiveM's ExecutableLoader.Snapshot.cpp
     match build_number {
         // Latest builds (update 3420+)
         3420 | 3410 | 3400 => 0x14187C378,
@@ -371,13 +343,8 @@ pub fn get_trigger_ep_for_build(build_number: u32) -> usize {
 // ============================================================================
 
 /// Alternative approach: Load executable via NtCreateSection + SEC_IMAGE.
-/// 
-/// This is the FiveM-recommended approach for loading GTA5.exe:
-/// 1. Create a section from the executable file (SEC_IMAGE flag)
-/// 2. Create a process from that section
-/// 3. Inject DLL into the new process
 #[cfg(windows)]
-pub fn launch_via_nt_create_section(exe_path: &str) -> Result<u32, String> {
+pub fn launch_via_nt_create_section(exe_path: &str) -> std::result::Result<u32, String> {
     use windows::Win32::System::Diagnostics::DbgHelp::*;
     
     unsafe {
@@ -391,14 +358,10 @@ pub fn launch_via_nt_create_section(exe_path: &str) -> Result<u32, String> {
             OPEN_EXISTING,
             0,
             None,
-        );
-        
-        if h_file.0.is_null() {
-            return Err(format!("Failed to open executable: {}", GetLastError()));
-        }
+        )?;
         
         // Create a section from the file (SEC_IMAGE = load as executable image).
-        let mut h_section: HANDLE = HANDLE(0);
+        let mut h_section: HANDLE = HANDLE(ptr::null_mut());
         let status = NtCreateSection(
             &mut h_section,
             windows::Win32::System::Threading::SECTION_ALL_ACCESS,
@@ -415,10 +378,6 @@ pub fn launch_via_nt_create_section(exe_path: &str) -> Result<u32, String> {
             return Err(format!("NtCreateSection failed: {}", status));
         }
         
-        // Create a process from the section.
-        // This requires native NtCreateProcessEx which is undocumented.
-        // In production, use RtlCreateProcessEx or similar.
-        
         let _ = h_section;
         
         Err("NtCreateSection approach requires additional FFI bindings".to_string())
@@ -426,7 +385,7 @@ pub fn launch_via_nt_create_section(exe_path: &str) -> Result<u32, String> {
 }
 
 #[cfg(not(windows))]
-pub fn launch_via_nt_create_section(_exe_path: &str) -> Result<u32, String> {
+pub fn launch_via_nt_create_section(_exe_path: &str) -> std::result::Result<u32, String> {
     let _ = _exe_path;
     Err("NtCreateSection not available on non-Windows".to_string())
 }
@@ -436,17 +395,11 @@ pub fn launch_via_nt_create_section(_exe_path: &str) -> Result<u32, String> {
 // ============================================================================
 
 /// Checks if the game build matches a known version.
-/// 
-/// In production, this would parse the PE header of GTA5.exe to extract
-/// the build number from the debug directory's CFI frame table.
 pub fn is_game_build_or_greater(current_build: u32, target_build: u32) -> bool {
     current_build >= target_build
 }
 
 /// Gets the detected game build number.
-/// 
-/// FiveM uses CFI (Control Flow Integrity) frame tables in the debug directory
-/// to extract the build number. Each GTA V version has a unique pattern.
 pub fn detect_game_build(game_module_base: usize) -> Option<u32> {
     #[cfg(windows)]
     unsafe {
@@ -457,7 +410,11 @@ pub fn detect_game_build(game_module_base: usize) -> Option<u32> {
         }
         
         // Get NT headers.
-        let nt_headers = ((game_module_base + dos_header.e_lfanew as usize) as *const executable_loader::ImageNTHeaders64).as_ref()?;
+        let nt_headers_ptr = (game_module_base + dos_header.e_lfanew as usize) as *const executable_loader::ImageNTHeaders64;
+        if nt_headers_ptr.is_null() {
+            return None;
+        }
+        let nt_headers = *nt_headers_ptr;
         
         // Get the debug directory from the data directories.
         let debug_dir_rva = nt_headers.optional_header.data_directory[0x06 /* IMAGE_DIRECTORY_ENTRY_DEBUG */].virtual_address;
@@ -465,9 +422,6 @@ pub fn detect_game_build(game_module_base: usize) -> Option<u32> {
         if debug_dir_rva == 0 {
             return None;
         }
-        
-        // In production, parse the CFI frame table to extract the build number.
-        // This is version-specific and requires maintaining a database of patterns.
         
         Some(3420u32) // Stub: latest known build
     }

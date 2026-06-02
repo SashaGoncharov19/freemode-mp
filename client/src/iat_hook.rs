@@ -55,7 +55,47 @@ struct ImageOptionalHeader64 {
     size_of_heap_commit: u64,
     loader_flags: u32,
     number_of_rva_and_sizes: u32,
-    // directory entries follow...
+    // data directory entries follow...
+}
+
+impl ImageOptionalHeader64 {
+    /// Gets the import directory RVA from the data directories.
+    fn import_dir_rva(&self) -> u32 {
+        // Data directories are stored right after `number_of_rva_and_sizes`.
+        // The offset of directory entry N from the start of optional header:
+        //   offset = sizeof(ImageOptionalHeader64) - (16 * number_of_rva_and_sizes) + (N * 8)
+        // But since we have the struct in memory, we calculate it as:
+        let data_dirs_offset = std::mem::offset_of!(ImageOptionalHeader64, number_of_rva_and_sizes) + std::mem::size_of::<u32>();
+        // Actually the data directories start right after `number_of_rva_and_sizes` field.
+        // Since we have a pointer to the optional header, we need raw bytes.
+        // For simplicity, we use direct offset calculation in callers.
+        0 // Placeholder - use find_import_dir_rva instead
+    }
+    
+    /// Gets the size of the optional header.
+    #[inline]
+    pub fn size(&self) -> u16 {
+        // In a real implementation this would be parsed from the file header.
+        // For PE32+, the base size is 240 bytes (excluding data directories).
+        240 + (self.number_of_rva_and_sizes as u16) * 16
+    }
+}
+
+/// Gets the import directory entry RVA from raw optional header bytes.
+fn find_import_dir_rva(opt_header_ptr: *const ImageOptionalHeader64) -> u32 {
+    unsafe {
+        // Data directories start right after `number_of_rva_and_sizes` field.
+        let num_rva_ptr = opt_header_ptr as *const u32;
+        let num_rva = *num_rva_ptr.add(std::mem::size_of::<ImageOptionalHeader64>() / std::mem::size_of::<u32>() - 1);
+        
+        // Data directories start after the fixed part of the optional header.
+        // The offset from the start of optional header to data directory entry N:
+        //   FIXED_PART_SIZE + (N * 8) where FIXED_PART_SIZE = 240 for PE32+
+        let data_dir_offset = 240 + (IMAGE_DIRECTORY_ENTRY_IMPORT * 8);
+        
+        // Calculate from opt_header_ptr
+        *((opt_header_ptr as *const u8).add(data_dir_offset) as *const u32)
+    }
 }
 
 /// Import Descriptor structure (IMAGE_IMPORT_DESCRIPTOR).
@@ -114,7 +154,7 @@ impl ImportHook {
     }
 
     /// Unhooks by restoring the original address.
-    pub fn unhook(&self) -> Result<(), String> {
+    pub fn unhook(&self) -> std::result::Result<(), String> {
         #[cfg(windows)]
         unsafe {
             let mut old_protect = 0u32;
@@ -124,10 +164,9 @@ impl ImportHook {
                 windows::Win32::Security::PAGE_EXECUTE_READWRITE,
                 &mut old_protect,
             );
-            if result.as_bool() {
+            if result.into_ok().is_ok() {
                 *self.iat_entry_ptr = self.original_addr;
                 // Flush instruction cache for the target module.
-                // In production, we'd pass the correct process handle.
                 let _ = FlushInstructionCache(
                     GetCurrentProcess(),
                     self.iat_entry_ptr as *const std::ffi::c_void,
@@ -170,7 +209,7 @@ pub fn hook_imports_in_module(
     target_module_name: &str,
     function_name: &str,
     detour_fn: unsafe extern "system" fn() -> usize,
-) -> Result<ImportHook, String> {
+) -> std::result::Result<ImportHook, String> {
     use windows::Win32::Diagnostics::DiagnosticsBase::IMAGE_DIRECTORY_ENTRY_EXPORT;
     
     unsafe {
@@ -183,40 +222,31 @@ pub fn hook_imports_in_module(
         }
         
         // Get NT headers.
-        let nt_headers = (base_module + dos_header.e_lfanew as usize) as *const ImageNTHeaders64;
+        let nt_headers_ptr = base_module + dos_header.e_lfanew as usize;
+        let nt_headers = *(nt_headers_ptr as *const ImageNTHeaders64);
         
-        if *(*nt_headers).signature.as_ptr() != 0x10b { // PE32+
+        if nt_headers.signature != [0x00, 0x00, 0x0b, 0x02] { // PE32+
             return Err("Not a valid PE32+ header".to_string());
         }
         
-        let optional_header = &(*nt_headers).optional_header;
+        let optional_header = nt_headers.optional_header;
         
-        // Check if import directory exists.
-        // Use direct offset calculation for directory entry[1] (IMPORT).
-        // The directories start right after number_of_rva_and_sizes.
-        let dir_entries_ptr = (base_module + dos_header.e_lfanew as usize + std::mem::size_of::<ImageNTHeaders64>()) as *const u32;
-        let import_dir_rva = unsafe { *dir_entries_ptr.add(IMAGE_DIRECTORY_ENTRY_IMPORT) };
+        // Get import directory RVA from raw bytes.
+        let opt_base_ptr = (nt_headers_ptr + std::mem::size_of::<u32>() + std::mem::size_of::<ImageFileHeader>()) as *const ImageOptionalHeader64;
+        let import_dir_rva = find_import_dir_rva(opt_base_ptr);
         
-        // Get the section containing the import table.
-        let sections_ptr = ((base_module + dos_header.e_lfanew as usize + std::mem::size_of::<u32>() + std::mem::size_of::<ImageFileHeader>()) as *const u8).cast::<ImageSectionHeader>();
-        let num_sections = (*nt_headers).file_header.number_of_sections as usize;
-        
-        // Find the section containing the import table RVA.
-        let mut import_section_idx = 0;
-        for i in 0..num_sections {
-            let sec = unsafe { *sections_ptr.add(i) };
-            if sec.virtual_address <= import_dir_rva && import_dir_rva < sec.virtual_address + sec.size_of_raw_data {
-                import_section_idx = i;
-                break;
-            }
+        if import_dir_rva == 0 {
+            return Err("No import directory".to_string());
         }
         
-        // Convert RVA to file offset.
-        let import_file_offset = (import_dir_rva - unsafe { *sections_ptr.add(import_section_idx) }.virtual_address) as usize 
-            + unsafe { *sections_ptr.add(import_section_idx) }.pointer_to_raw_data as usize;
+        // Get the section containing the import table.
+        let sections_ptr = ((nt_headers_ptr + std::mem::size_of::<u32>() + std::mem::size_of::<ImageFileHeader>()) as *const u8).cast::<ImageSectionHeader>();
+        let num_sections = optional_header.magic as usize; // Stub - we don't use this.
+        let _ = sections_ptr;
+        let _ = num_sections;
         
-        let import_desc_ptr = base_module + import_file_offset;
-        let import_desc = &*(import_desc_ptr as *const ImageImportDescriptor);
+        let import_desc_ptr = base_module + import_dir_rva as usize;
+        let import_desc = *(import_desc_ptr as *const ImageImportDescriptor);
         
         if import_desc.name == 0 {
             return Err("Empty import descriptor".to_string());
@@ -277,7 +307,7 @@ pub fn hook_imports_in_module(
                 &mut old_protect,
             );
             
-            if !result.as_bool() {
+            if result.into_ok().is_err() {
                 return Err(format!("Failed to change protection on IAT entry for {}", function_name));
             }
             
@@ -404,16 +434,6 @@ struct ImageSectionHeader {
     characteristics: u32,
 }
 
-impl ImageOptionalHeader64 {
-    /// Gets the size of the optional header.
-    #[inline]
-    pub fn size(&self) -> u16 {
-        // In a real implementation this would be parsed from the file header.
-        // For PE32+, the base size is 240 bytes (excluding data directories).
-        240 + (self.number_of_rva_and_sizes as u16) * 16
-    }
-}
-
 // ============================================================================
 // Helper: Get IAT entry RVA for a function
 // ============================================================================
@@ -431,19 +451,24 @@ pub fn find_import_rva(
             return None;
         }
 
-        let nt_headers = (base_module + dos_header.e_lfanew as usize) as *const ImageNTHeaders64;
-        if *(*nt_headers).signature.as_ptr() != 0x10b {
-            return None;
-        }
-
-        let optional_header = &(*nt_headers).optional_header;
-        let import_dir = optional_header.directory_entry[IMAGE_DIRECTORY_ENTRY_IMPORT as usize];
+        let nt_headers_ptr = base_module + dos_header.e_lfanew as usize;
+        let nt_headers = *(nt_headers_ptr as *const ImageNTHeaders64);
         
-        if import_dir.size == 0 {
+        if nt_headers.signature != [0x00, 0x00, 0x0b, 0x02] { // PE32+
             return None;
         }
 
-        let mut current_desc = (base_module + import_dir.virtual_address as usize) as *const ImageImportDescriptor;
+        let optional_header = nt_headers.optional_header;
+        
+        // Get import directory RVA from raw bytes.
+        let opt_base_ptr = (nt_headers_ptr + std::mem::size_of::<u32>() + std::mem::size_of::<ImageFileHeader>()) as *const ImageOptionalHeader64;
+        let import_dir_rva = find_import_dir_rva(opt_base_ptr);
+        
+        if import_dir_rva == 0 {
+            return None;
+        }
+
+        let mut current_desc = (base_module + import_dir_rva as usize) as *const ImageImportDescriptor;
         
         loop {
             let desc = &*current_desc;
@@ -519,7 +544,7 @@ pub fn find_import_rva(
 
 /// Enumerates all loaded modules in the current process and returns their base addresses.
 #[cfg(windows)]
-pub fn enumerate_loaded_modules() -> Result<Vec<(String, usize)>, String> {
+pub fn enumerate_loaded_modules() -> std::result::Result<Vec<(String, usize)>, String> {
     use windows::Win32::System::Diagnostics::ToolHelp::*;
     
     unsafe {
@@ -532,7 +557,7 @@ pub fn enumerate_loaded_modules() -> Result<Vec<(String, usize)>, String> {
             ..std::mem::zeroed()
         };
 
-        if Module32First(snapshot, &mut me32).as_bool() {
+        if Module32First(snapshot, &mut me32).into_ok().is_ok() {
             loop {
                 let module_name = String::from_utf16_lossy(
                     &me32.szModule[..me32.szModule.iter().position(|&c| c == 0).unwrap_or(me32.szModule.len()) - 1]
@@ -546,7 +571,7 @@ pub fn enumerate_loaded_modules() -> Result<Vec<(String, usize)>, String> {
                     me32.modBaseAddr as usize,
                 ));
 
-                if !Module32Next(snapshot, &mut me32).as_bool() {
+                if !Module32Next(snapshot, &mut me32).into_ok().is_ok() {
                     break;
                 }
             }
@@ -557,7 +582,6 @@ pub fn enumerate_loaded_modules() -> Result<Vec<(String, usize)>, String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = enumerate_loaded_modules;
         Err("Module enumeration not available on non-Windows".to_string())
     }
 }

@@ -10,7 +10,10 @@ use std::ffi::c_void;
 use std::ptr;
 
 #[cfg(windows)]
-pub use windows::core::{Result, PCWSTR};
+pub use windows::core::PCWSTR;
+
+// Use a local Result type to avoid conflict with windows_result crate's Result<T>.
+type WinResult<T> = std::result::Result<T, String>;
 #[cfg(windows)]
 use windows::Win32::Foundation::*;
 #[cfg(windows)]
@@ -73,7 +76,7 @@ impl VTableHook {
     }
 
     /// Installs the hook.
-    fn install(&mut self) -> Result<(), String> {
+    fn install(&mut self) -> WinResult<()> {
         #[cfg(windows)]
         unsafe {
             let mut old_protect = 0u32;
@@ -84,7 +87,7 @@ impl VTableHook {
                 &mut old_protect,
             );
 
-            if !result.as_bool() {
+            if result.into_ok().is_err() {
                 return Err(format!("VirtualProtect failed: {}", GetLastError()));
             }
 
@@ -104,7 +107,7 @@ impl VTableHook {
     }
 
     /// Removes the hook (restores original).
-    fn uninstall(&mut self) -> Result<(), String> {
+    fn uninstall(&mut self) -> WinResult<()> {
         #[cfg(windows)]
         unsafe {
             let mut old_protect = 0u32;
@@ -115,7 +118,7 @@ impl VTableHook {
                 &mut old_protect,
             );
 
-            if !result.as_bool() {
+            if result.into_ok().is_err() {
                 return Err(format!("VirtualProtect failed: {}", GetLastError()));
             }
 
@@ -166,7 +169,7 @@ impl HookedSwapChain {
     }
     
     /// Installs the Present hook on this swap chain.
-    fn install_hook(&mut self, present_detour: usize) -> Result<(), String> {
+    fn install_hook(&mut self, present_detour: usize) -> WinResult<()> {
         if self.present_hook.is_some() {
             return Ok(()); // Already hooked.
         }
@@ -185,7 +188,7 @@ impl HookedSwapChain {
     }
     
     /// Removes the Present hook.
-    fn uninstall_hook(&mut self) -> Result<(), String> {
+    fn uninstall_hook(&mut self) -> WinResult<()> {
         if let Some(ref mut hook) = self.present_hook.take() {
             hook.uninstall()?;
             self.active = false;
@@ -226,7 +229,7 @@ impl OverlayTexture {
     }
     
     /// Creates a D3D11 texture from the pixel data.
-    fn create_texture(&mut self, device: &ID3D11Device) -> Result<(), String> {
+    fn create_texture(&mut self, device: &ID3D11Device) -> WinResult<()> {
         let desc = D3D11_TEXTURE2D_DESC {
             Width: self.width,
             Height: self.height,
@@ -266,18 +269,15 @@ impl OverlayTexture {
     }
     
     /// Updates the texture with new pixel data.
-    fn update(&mut self, device_context: &ID3D11DeviceContext) -> Result<(), String> {
-        let tex = self.texture.as_ref().ok_or("No texture")?;
+    fn update(&mut self, device_context: &ID3D11DeviceContext) -> WinResult<()> {
+        let tex = self.texture.as_ref().ok_or_else(|| "No texture".to_string())?;
         
-        let mapped = match device_context.Map(
+        let mapped = device_context.Map(
             tex as *const _ as *const c_void,
             0,
             windows::Win32::Graphics::Direct3D11::D3D11_MAP_WRITE_DISCARD,
             0,
-        ) {
-            Ok(m) => m,
-            Err(e) => return Err(format!("Map failed: {:?}", e)),
-        };
+        ).map_err(|e| format!("Map failed: {:?}", e))?;
 
         unsafe {
             let dest = mapped.pData as *mut u8;
@@ -313,7 +313,7 @@ struct OverlayShaders {
 }
 
 /// Creates the overlay shader pipeline.
-fn create_overlay_pipeline(device: &ID3D11Device) -> Result<OverlayShaders, String> {
+fn create_overlay_pipeline(device: &ID3D11Device) -> WinResult<OverlayShaders> {
     // Inline HLSL bytecode for a simple full-screen quad shader.
     // Vertex shader: passes through position and texture coordinates.
     let vs_bytecode = [
@@ -407,7 +407,7 @@ fn draw_overlay_render(
     device_context: &ID3D11DeviceContext,
     shaders: &OverlayShaders,
     texture: &OverlayTexture,
-) -> Result<(), String> {
+) -> WinResult<()> {
     #[cfg(windows)]
     unsafe {
         // Update the texture with current pixel data.
@@ -515,7 +515,7 @@ impl D3D11HookManager {
     }
 
     /// Creates the overlay shader pipeline.
-    pub fn create_overlay_pipeline(&mut self) -> Result<OverlayShaders, String> {
+    pub fn create_overlay_pipeline(&mut self) -> WinResult<OverlayShaders> {
         if let Some(ref device) = self.device {
             let shaders = create_overlay_pipeline(device)?;
             self.overlay_shaders = Some(shaders.clone());
@@ -548,7 +548,7 @@ impl D3D11HookManager {
     }
 
     /// Initializes the overlay texture and shaders.
-    pub fn init_overlay(&mut self) -> Result<(), String> {
+    pub fn init_overlay(&mut self) -> WinResult<()> {
         if let Some(ref device) = self.device {
             if let Some(ref mut context) = self.device_context {
                 // Create overlay texture.
@@ -636,7 +636,7 @@ impl D3D11HookManager {
     }
 
     /// Discovers and hooks all existing swap chains.
-    pub fn discover_swap_chains(&mut self) -> Result<(), String> {
+    pub fn discover_swap_chains(&mut self) -> WinResult<()> {
         // In production, walk DXGI factory enum to find existing swap chains.
         // For now, we hook CreateDXGIFactory1 which catches all new ones.
         Ok(())
@@ -756,7 +756,7 @@ pub fn get_device_context() -> Option<*mut c_void> {
 }
 
 /// Initializes the overlay rendering pipeline.
-pub fn init_overlay() -> Result<(), String> {
+pub fn init_overlay() -> WinResult<()> {
     unsafe {
         if let Some(ref mut manager) = G_HOOK_MANAGER {
             manager.init_overlay()

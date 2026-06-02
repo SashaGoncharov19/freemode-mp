@@ -10,9 +10,11 @@
 mod iat_hook;
 
 use std::ptr;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 
 #[cfg(windows)]
-use iat_hook::enumerate_loaded_modules;
+pub use iat_hook::enumerate_loaded_modules;
 
 // ============================================================================
 // Redirection data (suffix-based matching, like FiveM)
