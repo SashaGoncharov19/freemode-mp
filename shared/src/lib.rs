@@ -1,14 +1,17 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! FreeMode Shared Library — Common types and utilities for client/server.
+//! 
+//! This crate provides shared data structures used by both the client DLL
+//! and server core, ensuring consistent serialization and protocol behavior.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod packet;
+pub mod entities;
+pub mod network;
+pub mod config;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use packet::*;
+pub use entities::*;
+pub use network::*;
+pub use config::*;
+
+/// Shared library version.
+pub const SHARED_VERSION: &str = env!("CARGO_PKG_VERSION");

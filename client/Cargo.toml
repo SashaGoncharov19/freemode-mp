@@ -1,19 +1,36 @@
 [package]
-name = "client"
-version = "0.1.0"
-edition = "2024"
+name = "freemode-client"
+description = "FreeMode Client DLL"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-shared = { path = "../shared" }
-sdk = { path = "../sdk" }
+freemode-sdk = { path = "../sdk" }
+freemode-shared = { path = "../shared" }
+freemode-log = { path = "../log" }
+bytemuck.workspace = true
+log = "0.4"
 
-[target.'cfg(windows)'.dependencies.windows]
-version = "0.58.0"
-features = [
-    "Win32_Foundation",
-    "Win32_System_Console",
-    "Win32_System_LibraryLoader",
-]
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Kernel",
+  "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_SystemServices",
+  "Win32_UI_WindowsAndMessaging",
+] }

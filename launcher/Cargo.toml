@@ -1,20 +1,29 @@
 [package]
-name = "launcher"
-version = "0.1.0"
-edition = "2024"
+name = "freemode-launcher"
+description = "FreeMode Launcher — GTA V"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 
 [dependencies]
-sysinfo = "0.30"
-
-[target.'cfg(windows)'.dependencies.windows]
-version = "0.58.0"
-features = [
+freemode-sdk = { path = "../sdk" }
+freemode-shared = { path = "../shared" }
+freemode-log = { path = "../log" }
+serde.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+env_logger = "0.11"
+dirs = "6"
+windows = { workspace = true, features = [
     "Win32_Foundation",
-    "Win32_System_Threading",
-    "Win32_System_Memory",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_LibraryLoader",
-    "Win32_Security",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
     "Win32_UI_Shell",
-    "Win32_UI_WindowsAndMessaging",
-]
+] }
