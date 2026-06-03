@@ -196,9 +196,9 @@ fn register_dll_directories() {
 fn get_module_path() -> std::path::PathBuf {
     #[cfg(windows)]
     unsafe {
-        let h_mod = GetModuleHandleW(PCWSTR(ptr::null())).unwrap_or_default();
+        let h_mod = windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR(ptr::null())).unwrap_or_default();
         let mut buffer = [0u16; 260];
-        let len = GetModuleFileNameW(h_mod, &mut buffer);
+        let len = windows::Win32::Foundation::GetModuleFileNameW(h_mod, &mut buffer);
         if len > 0 {
             let path = String::from_utf16_lossy(&buffer[..len as usize]);
             return std::path::PathBuf::from(path);
@@ -237,7 +237,7 @@ extern "system" fn CreateFileW_detour(
 
         if redirected != orig_filename {
             let wide_path: Vec<u16> = redirected.encode_utf16().chain(std::iter::once(0)).collect();
-            return CreateFileW(
+            return windows::Win32::Storage::FileSystem::CreateFileW(
                 PCWSTR(wide_path.as_ptr()),
                 _dw_desired_access,
                 _dw_share_mode,
@@ -258,7 +258,7 @@ extern "system" fn CreateFileW_detour(
 }
 
 #[cfg(windows)]
-extern "system" fn LoadLibraryW_detour(lp_lib_filename: PCWSTR) -> HMODULE {
+extern "system" fn LoadLibraryW_detour(lp_lib_filename: PCWSTR) -> windows::Win32::Foundation::HMODULE {
     unsafe {
         let lib_name = String::from_utf16_lossy(
             &std::slice::from_raw_parts(lp_lib_filename as *const u16, (strlen_w(lp_lib_filename)) as usize)
@@ -266,19 +266,19 @@ extern "system" fn LoadLibraryW_detour(lp_lib_filename: PCWSTR) -> HMODULE {
 
         // Intercept xlive.dll loading — return INVALID_HANDLE_VALUE.
         if lib_name.to_lowercase() == "xlive.dll" {
-            return HMODULE(0xFFFF_FFFFu32 as isize); // INVALID_HANDLE_VALUE
+            return windows::Win32::Foundation::HMODULE(std::ptr::null_mut());
         }
 
         // Check for other redirections.
         let redirected = map_redirected_filename(&lib_name);
-        
+
         if redirected != lib_name {
             let wide_path: Vec<u16> = redirected.encode_utf16().chain(std::iter::once(0)).collect();
-            return LoadLibraryW(PCWSTR(wide_path.as_ptr()));
+            return windows::Win32::System::LibraryLoader::LoadLibraryW(PCWSTR(wide_path.as_ptr()));
         }
 
         // Call original LoadLibraryW.
-        let orig_fn: extern "system" fn(PCWSTR) -> HMODULE = std::mem::transmute(ORIG_LOADLIBRARYW);
+        let orig_fn: extern "system" fn(PCWSTR) -> windows::Win32::Foundation::HMODULE = std::mem::transmute(ORIG_LOADLIBRARYW);
         orig_fn(lp_lib_filename)
     }
 }
@@ -327,9 +327,9 @@ fn hook_function(
     #[cfg(windows)]
     unsafe {
         // Get the base address of this DLL (where we're hooked).
-        let our_base = GetModuleHandleW(PCWSTR(ptr::null()))
+        let our_base = windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR(ptr::null()))
             .map_err(|e| format!("Failed to get module handle: {:?}", e))?;
-        
+
         let base_addr = our_base.0 as usize;
 
         // Find the function in kernel32.dll's import table.
@@ -341,14 +341,14 @@ fn hook_function(
 
         // Protect the IAT entry for writing.
         let mut old_protect: u32 = 0;
-        let result = windows::Win32::Foundation::VirtualProtect(
+        let result = windows::Win32::System::Memory::VirtualProtect(
             iat_entry as *mut std::ffi::c_void,
             8,
-            windows::Win32::Security::PAGE_EXECUTE_READWRITE,
+            windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE,
             &mut old_protect,
         );
 
-        if !result.ok().is_ok() {
+        if !result.is_ok() {
             return Err(format!("Failed to change protection on IAT entry for {}", func_name));
         }
 
@@ -365,7 +365,7 @@ fn hook_function(
         }
 
         // Restore protection.
-        let _ = windows::Win32::Foundation::VirtualProtect(
+        let _ = windows::Win32::System::Memory::VirtualProtect(
             iat_entry as *mut std::ffi::c_void,
             8,
             old_protect,
@@ -405,10 +405,10 @@ fn unhook_function(
 }
 
 /// Finds the IAT entry address for a given function in a module.
-fn find_iat_entry(h_mod: HMODULEStub, func_name: &str) -> Result<usize, String> {
+fn find_iat_entry(h_mod: isize, func_name: &str) -> Result<usize, String> {
     #[cfg(windows)]
     unsafe {
-        let orig = iat_hook::find_import_rva(h_mod.0 as usize, "kernel32.dll", func_name.trim_end_matches('\0'));
+        let orig = iat_hook::find_import_rva(h_mod as usize, "kernel32.dll", func_name.trim_end_matches('\0'));
         Ok(orig.unwrap_or(0) as usize)
     }
     #[cfg(not(windows))]

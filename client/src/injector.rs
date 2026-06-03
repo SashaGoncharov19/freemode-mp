@@ -12,13 +12,15 @@ use std::ptr;
 use std::os::windows::ffi::OsStrExt;
 
 #[cfg(windows)]
-use windows::Win32::Foundation::*;
+pub use windows::Win32::Foundation::*;
+#[cfg(windows)]
+pub use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL};
 #[cfg(windows)]
 use windows::Win32::System::Diagnostics::Debug::*;
 #[cfg(windows)]
 use windows::Win32::System::Memory::*;
 #[cfg(windows)]
-use windows::Win32::System::Threading::*;
+pub use windows::Win32::System::Threading::*;
 
 // Non-Windows stubs.
 #[cfg(not(windows))]
@@ -171,7 +173,6 @@ fn get_trigger_ep(_build_number: u32) -> usize {
 
 /// Checks if a given address is the trigger address.
 pub fn is_trigger_address(addr: usize) -> bool {
-    #[allow(unused_variables)]
     let ep = get_trigger_ep(0);
     addr == ep || (ep != 0 && addr >= ep && addr < ep + 16)
 }
@@ -197,6 +198,7 @@ pub fn create_section_from_image(gta_path: std::ffi::OsString) -> windows_core::
 
         // Stub NtCreateSection — in production, call via ntdll.dll.
         let section = HANDLE(ptr::null_mut());
+        let _ = file_handle;
         Ok(section)
     }
 }
@@ -264,7 +266,7 @@ extern "system" fn snapshot_handler(exception_info: *mut EXCEPTION_POINTERS) -> 
             return 0;
         }
 
-        let gta_module = GetModuleHandleW(PCWSTR(ptr::null()));
+        let gta_module = windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR(ptr::null()));
         let module_base = match gta_module {
             Ok(h) => h.0 as usize,
             Err(_) => 0,
@@ -331,30 +333,30 @@ pub fn inject_dll_from_launcher_folder(_gta5_process: HANDLE) -> windows_core::R
     unsafe {
         // Get the launcher executable's directory.
         let launcher_exe = std::env::current_exe()?;
-        
+
         let launcher_dir = launcher_exe.parent()
             .ok_or_else(|| windows_core::Error::from_win32())?;
-        
+
         // Path to our client DLL: <launcher_folder>/freemode-client.dll
         let dll_path = launcher_dir.join("freemode-client.dll");
-        
+
         if !dll_path.exists() {
             return Err(windows_core::Error::from_win32());
         }
-        
+
         // Convert to wide string.
         let _wide_dll: Vec<u16> = dll_path.as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        
+
         // Open the target process.
         let process = OpenProcess(
             PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE,
             false,
             0, // Stub: would use GetProcessId()
         )?;
-        
+
         // Allocate memory in target process for path.
         let remote_path = VirtualAllocEx(
             process,
@@ -363,25 +365,25 @@ pub fn inject_dll_from_launcher_folder(_gta5_process: HANDLE) -> windows_core::R
             MEM_RESERVE | MEM_COMMIT,
             PAGE_READWRITE,
         );
-        
+
         if remote_path.is_null() {
             let _ = CloseHandle(process);
             return Err(windows_core::Error::from_win32());
         }
-        
+
         // Create remote thread that calls LoadLibraryW.
-        let h_kernel32 = GetModuleHandleW(PCWSTR(b"kernel32.dll\0".as_ptr() as *const u16))?;
+        let h_kernel32 = windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR(b"kernel32.dll\0".as_ptr() as *const u16))?;
         let load_library_addr = GetProcAddress(
             h_kernel32,
             windows_core::PCSTR(b"LoadLibraryW\0".as_ptr()),
         )?;
-        
+
         if load_library_addr.is_none() {
             let _ = VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
             let _ = CloseHandle(process);
             return Err(windows_core::Error::from_win32());
         }
-        
+
         let thread = CreateRemoteThread(
             process,
             None,
@@ -391,21 +393,21 @@ pub fn inject_dll_from_launcher_folder(_gta5_process: HANDLE) -> windows_core::R
             0,
             None,
         )?;
-        
-        if thread.0.is_null() {
+
+        if thread.is_null() {
             let _ = VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
             let _ = CloseHandle(process);
             return Err(windows_core::Error::from_win32());
         }
-        
+
         // Wait for the thread to complete.
         let _ = WaitForSingleObject(thread, INFINITE);
-        
+
         // Cleanup.
         let _ = VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
         let _ = CloseHandle(thread);
         let _ = CloseHandle(process);
-        
+
         Ok(())
     }
 }

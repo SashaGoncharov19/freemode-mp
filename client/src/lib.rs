@@ -23,10 +23,7 @@ mod network_client;
 use std::ptr;
 
 // Windows FFI.
-use windows_core::GUID;
 use windows::Win32::Foundation::{HANDLE, HMODULE};
-use windows::Win32::Storage::FileSystem::CreateFileW;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::Storage::FileSystem::{MapViewOfFile, FILE_MAP_ALL_ACCESS};
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 
@@ -35,10 +32,10 @@ const DLL_PROCESS_ATTACH: u32 = 1;
 const DLL_PROCESS_DETACH: u32 = 0;
 
 // INVALID_HANDLE_VALUE constant for Windows.
-#[allow(dead_code)]
-const INVALID_HANDLE_VALUE: HANDLE = HANDLE(-1isize as isize);
+const INVALID_HANDLE_VALUE: HANDLE = HANDLE(std::ptr::null_mut());
 
 // TRUE constant for BOOL.
+const FALSE: i32 = 0;
 const TRUE: i32 = 1;
 
 // ============================================================================
@@ -126,6 +123,7 @@ static mut SHARED_CONTEXT_DATA: SharedContextData = SharedContextData {
 };
 
 use std::os::windows::ffi::OsStrExt;
+use std::ffi::OsStr;
 
 type PCWSTR = windows_core::PCWSTR;
 
@@ -154,7 +152,7 @@ unsafe fn _dll_attach(_module: HMODULE) {
     // Apply API hooks for game modification.
     if G_HOOK_MANAGER.is_none() {
         G_HOOK_MANAGER = Some(HooksManager);
-        
+
         // Log hook application attempts.
         let result = hooks::apply_hooks();
         if result {
@@ -208,9 +206,7 @@ unsafe fn _dll_detach() {
 
 /// Initializes the shared context memory mapping for launcher communication.
 fn _initialize_shared_context() {
-    use std::os::windows::ffi::OsStrExt;
-
-    let shm_name: Vec<u16> = std::ffi::OsStr::new("Global\\FreeModeShm")
+    let shm_name: Vec<u16> = OsStr::new("Global\\FreeModeShm")
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
@@ -222,15 +218,15 @@ fn _initialize_shared_context() {
             None,
             SECURITY_ATTRIBUTES {
                 nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: ptr::null(),
-                bInheritHandle: TRUE != 0,
+                lpSecurityDescriptor: ptr::null_mut(),
+                bInheritHandle: TRUE != FALSE,
             },
             0,
             MAX_SHARED_CTX_SIZE as u32,
             PCWSTR(shm_name.as_ptr()),
         );
 
-        if h_map.0.is_null() {
+        if h_map.is_null() {
             freemode_log::error!("Failed to create shared memory for launcher communication");
             return;
         }
@@ -251,7 +247,7 @@ fn _initialize_shared_context() {
         let ctx = std::ptr::addr_of_mut!(SHARED_CONTEXT_DATA).cast::<SharedContextData>();
         *ctx = SharedContextData::default();
         SHARED_CONTEXT_PTR = ctx;
-        
+
         freemode_log::load!("HostSharedData shared memory initialized: Global\\FreeModeShm");
     }
 }
@@ -291,7 +287,6 @@ pub extern "system" fn FreeModeClientShutdown() {
 /// Converts a &str to a null-terminated PCWSTR (wide string).
 #[allow(dead_code)]
 fn str_to_pcw(s: &str) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
     OsStr::new(s)
         .encode_wide()
         .chain(std::iter::once(0))
@@ -303,7 +298,7 @@ fn str_to_pcw(s: &str) -> Vec<u16> {
 fn get_module_base() -> *mut std::ffi::c_void {
     unsafe {
         let name = str_to_pcw("GTA5.exe");
-        let hmod = GetModuleHandleW(PCWSTR(name.as_ptr())).unwrap_or_default();
+        let hmod = windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR(name.as_ptr())).unwrap_or_default();
         hmod.0 as *mut std::ffi::c_void
     }
 }

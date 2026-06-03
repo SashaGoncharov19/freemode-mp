@@ -7,7 +7,6 @@
 //! - Minimal latency (< 1ms frame delivery)
 
 use std::ffi::c_void;
-use std::ptr;
 
 #[cfg(windows)]
 pub use windows::Win32::Foundation::*;
@@ -15,8 +14,6 @@ pub use windows::Win32::Foundation::*;
 use windows::Win32::Storage::FileSystem::*;
 #[cfg(windows)]
 use windows::Win32::System::Threading::*;
-#[cfg(windows)]
-use windows::Win32::System::WindowsProgramming::*;
 
 // ============================================================================
 // Constants
@@ -121,18 +118,22 @@ impl SharedMemory {
         #[cfg(windows)]
         unsafe {
             let required_size = (width as usize) * (height as usize) * 4; // BGRA.
-            
+
             // Create the shared memory section.
+            let shm_wide: Vec<u16> = std::ffi::OsStr::new(SHM_PIXEL_DATA_NAME)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
             let handle = CreateFileMappingW(
                 INVALID_HANDLE_VALUE,
                 None,
                 PAGE_READWRITE,
                 0,
                 required_size as u32,
-                PCWSTR(SHM_PIXEL_DATA_NAME.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>().as_ptr()),
+                PCWSTR(shm_wide.as_ptr()),
             );
 
-            if handle.0.is_null() {
+            if handle.is_null() {
                 return Err(format!("Failed to create shared memory: {:?}", GetLastError()));
             }
 
@@ -172,13 +173,17 @@ impl SharedMemory {
     pub fn open() -> Result<Self, String> {
         #[cfg(windows)]
         unsafe {
+            let shm_wide: Vec<u16> = std::ffi::OsStr::new(SHM_PIXEL_DATA_NAME)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
             let handle = OpenFileMappingW(
                 FILE_MAP_READ,
                 false,
-                PCWSTR(SHM_PIXEL_DATA_NAME.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>().as_ptr()),
+                PCWSTR(shm_wide.as_ptr()),
             );
 
-            if handle.0.is_null() {
+            if handle.is_null() {
                 return Err(format!("Failed to open shared memory: {:?}", GetLastError()));
             }
 
@@ -280,10 +285,13 @@ impl NamedPipe {
     pub fn create_server() -> Result<Self, String> {
         #[cfg(windows)]
         unsafe {
-            let pipe_name: Vec<u16> = CONTROL_PIPE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
-            
+            let pipe_wide: Vec<u16> = std::ffi::OsStr::new(CONTROL_PIPE_NAME)
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+
             let handle = CreateNamedPipeW(
-                PCWSTR(pipe_name.as_ptr()),
+                PCWSTR(pipe_wide.as_ptr()),
                 PIPE_ACCESS_DUPLEX,
                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
                 PIPE_UNLIMITED_INSTANCES,
@@ -293,13 +301,13 @@ impl NamedPipe {
                 None,
             );
 
-            if handle.0.is_null() {
+            if handle.is_null() {
                 return Err(format!("Failed to create named pipe: {:?}", GetLastError()));
             }
 
             // In production, call ConnectNamedPipe here (blocking).
             // For now, just return the handle.
-            
+
             Ok(Self {
                 pipe_handle: handle,
                 connected: false,
@@ -315,19 +323,27 @@ impl NamedPipe {
     pub fn connect_client() -> Result<Self, String> {
         #[cfg(windows)]
         unsafe {
-            let pipe_name: Vec<u16> = CONTROL_PIPE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
-            
+            let pipe_wide: Vec<u16> = std::ffi::OsStr::new(CONTROL_PIPE_NAME)
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+
+            // GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000
+            let access: u32 = 0xC0000000;
+            // FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2
+            let share: u32 = 3;
+
             let handle = CreateFileW(
-                PCWSTR(pipe_name.as_ptr()),
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                PCWSTR(pipe_wide.as_ptr()),
+                access,
+                share,
                 None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
+                windows::Win32::Storage::FileSystem::FILE_OPEN_EXISTING,
+                windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
                 None,
             );
 
-            if handle.0.is_null() {
+            if handle.is_null() {
                 return Err(format!("Failed to connect to named pipe: {:?}", GetLastError()));
             }
 
@@ -349,12 +365,13 @@ impl NamedPipe {
             let mut bytes_written: u32 = 0;
             let result = WriteFile(
                 self.pipe_handle,
-                Some(cmd),
+                Some(cmd.as_ptr()),
+                Some(cmd.len() as u32),
                 Some(&mut bytes_written),
                 None,
             );
 
-            if result.ok().is_ok() {
+            if result.is_ok() {
                 Ok(())
             } else {
                 Err(format!("Failed to write to pipe: {:?}", GetLastError()))
@@ -379,7 +396,7 @@ impl NamedPipe {
                 None,
             );
 
-            if result.ok().is_ok() {
+            if result.is_ok() {
                 Ok(bytes_read as usize)
             } else {
                 Err(format!("Failed to read from pipe: {:?}", GetLastError()))
@@ -445,9 +462,13 @@ pub struct ControlCommand {
 impl ControlCommand {
     /// Creates a new command.
     pub fn new(cmd: Command, payload: &[u8]) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(std::mem::size_of::<u32>() * 2 + payload.len());
-        buf.extend_from_slice(&[cmd as u32]);
-        buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        let mut buf = Vec::with_capacity(8 + payload.len());
+        buf.extend_from_slice(&cmd as *const Command as *const u8);
+        // Pad to 4 bytes for cmd
+        buf.resize(4, 0);
+        // Write payload_len as little-endian u32
+        let len_bytes = (payload.len() as u32).to_le_bytes();
+        buf.extend_from_slice(&len_bytes);
         buf.extend_from_slice(payload);
         buf
     }
@@ -481,7 +502,7 @@ impl ControlCommand {
 // ============================================================================
 
 /// A lightweight browser process that renders HTML via software and sends pixels via shared memory.
-/// 
+///
 /// This replaces CEF entirely for maximum performance:
 /// - Software rendering with `emscripten`-compiled html2canvas or similar
 /// - Shared memory for pixel transfer (zero-copy)
@@ -539,15 +560,15 @@ impl GameRenderer {
     /// Initializes by opening existing shared memory.
     pub fn init(&mut self) -> Result<(), String> {
         self.pixel_shm = Some(SharedMemory::open()?);
-        
+
         // Connect to control pipe.
         self.control_pipe = Some(NamedPipe::connect_client()?);
-        
+
         // Send start command.
         if let Some(ref pipe) = self.control_pipe {
             let _ = pipe.send_command(&ControlCommand::new(Command::Start, &[]));
         }
-        
+
         Ok(())
     }
 
@@ -558,7 +579,7 @@ impl GameRenderer {
                 let w = shm.width().unwrap_or(0);
                 let h = shm.height().unwrap_or(0);
                 let data_ptr = shm.data_ptr();
-                
+
                 if !data_ptr.is_null() && w > 0 && h > 0 {
                     unsafe {
                         let len = (w * h * 4) as usize;

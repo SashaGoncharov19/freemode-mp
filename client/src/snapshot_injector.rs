@@ -7,8 +7,6 @@ use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 pub use windows::Win32::Foundation::*;
 #[cfg(windows)]
-use windows::Win32::Storage::FileSystem::*;
-#[cfg(windows)]
 pub use windows::Win32::System::LibraryLoader::*;
 #[cfg(windows)]
 pub use windows::Win32::System::Threading::*;
@@ -32,7 +30,7 @@ impl SnapshotInjector {
             veh_installed: false,
         }
     }
-    
+
     pub fn initialize(&mut self, _exe_path: &str) -> std::result::Result<(), String> {
         #[cfg(windows)]
         unsafe {
@@ -46,7 +44,7 @@ impl SnapshotInjector {
                 dwProcessId: 0,
                 dwThreadId: 0,
             };
-            
+
             let wide_path: Vec<u16> = _exe_path.encode_utf16().chain(std::iter::once(0)).collect();
             let result = CreateProcessW(
                 PCWSTR(ptr::null()),
@@ -60,11 +58,11 @@ impl SnapshotInjector {
                 &mut startup_info as *mut _,
                 &mut process_info as *mut _,
             );
-            
-            if !result.ok().is_ok() {
+
+            if !result.is_ok() {
                 return Err(format!("CreateProcessW failed"));
             }
-            
+
             self.process_handle = process_info.hProcess;
             self.process_id = process_info.dwProcessId;
             Ok(())
@@ -75,7 +73,7 @@ impl SnapshotInjector {
             Err("Not available on non-Windows".to_string())
         }
     }
-    
+
     pub fn install_veh(&mut self) -> std::result::Result<(), String> {
         unsafe {
             G_TRIGGER_ADDRESS = 0x14175DE00;
@@ -88,11 +86,11 @@ impl SnapshotInjector {
             }
         }
     }
-    
+
     pub fn remove_veh(&mut self) {
         self.veh_installed = false;
     }
-    
+
     pub fn resume_process(&mut self) -> std::result::Result<(), String> {
         #[cfg(windows)]
         unsafe {
@@ -107,11 +105,11 @@ impl SnapshotInjector {
             Err("Not available on non-Windows".to_string())
         }
     }
-    
+
     pub fn process_handle(&self) -> HANDLE {
         self.process_handle
     }
-    
+
     pub fn process_id(&self) -> u32 {
         self.process_id
     }
@@ -119,7 +117,7 @@ impl SnapshotInjector {
 
 impl Drop for SnapshotInjector {
     fn drop(&mut self) {
-        if !self.process_handle.0.is_null() {
+        if !self.process_handle.is_null() {
             #[cfg(windows)]
             unsafe { let _ = TerminateProcess(self.process_handle, 0); }
         }
@@ -127,7 +125,7 @@ impl Drop for SnapshotInjector {
 }
 
 #[cfg(windows)]
-extern "system" fn snapshot_veh_handler(_exception_info: *mut EXCEPTION_POINTERS) -> i32 {
+extern "system" fn snapshot_veh_handler(_exception_info: *mut windows::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS) -> i32 {
     EXCEPTION_CONTINUE_EXECUTION
 }
 
