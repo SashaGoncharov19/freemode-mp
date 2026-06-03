@@ -124,7 +124,7 @@ impl SharedMemory {
             
             // Create the shared memory section.
             let handle = CreateFileMappingW(
-                HANDLE(-1isize as isize), // INVALID_HANDLE_VALUE = page file backed.
+                INVALID_HANDLE_VALUE,
                 None,
                 PAGE_READWRITE,
                 0,
@@ -132,8 +132,8 @@ impl SharedMemory {
                 PCWSTR(SHM_PIXEL_DATA_NAME.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>().as_ptr()),
             );
 
-            if handle.0 == 0 {
-                return Err(format!("Failed to create shared memory: {}", GetLastError()));
+            if handle.is_null() {
+                return Err(format!("Failed to create shared memory: {:?}", GetLastError()));
             }
 
             let ptr = MapViewOfFile(
@@ -146,7 +146,7 @@ impl SharedMemory {
 
             if ptr.is_null() {
                 let _ = CloseHandle(handle);
-                return Err(format!("Failed to map view of shared memory: {}", GetLastError()));
+                return Err(format!("Failed to map view of shared memory: {:?}", GetLastError()));
             }
 
             // Initialize the pixel header.
@@ -178,8 +178,8 @@ impl SharedMemory {
                 PCWSTR(SHM_PIXEL_DATA_NAME.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>().as_ptr()),
             );
 
-            if handle.0 == 0 {
-                return Err(format!("Failed to open shared memory: {}", GetLastError()));
+            if handle.is_null() {
+                return Err(format!("Failed to open shared memory: {:?}", GetLastError()));
             }
 
             let ptr = MapViewOfFile(
@@ -192,7 +192,7 @@ impl SharedMemory {
 
             if ptr.is_null() {
                 let _ = CloseHandle(handle);
-                return Err(format!("Failed to map view: {}", GetLastError()));
+                return Err(format!("Failed to map view: {:?}", GetLastError()));
             }
 
             Ok(Self {
@@ -216,7 +216,7 @@ impl SharedMemory {
     /// Gets the header.
     pub fn header(&self) -> Option<PixelHeader> {
         if self.initialized && !self.ptr.is_null() {
-            unsafe { Some(*self.ptr as *mut PixelHeader) }
+            unsafe { Some((*self.ptr).clone()) }
         } else {
             None
         }
@@ -293,8 +293,8 @@ impl NamedPipe {
                 None,
             );
 
-            if handle.0 == 0 {
-                return Err(format!("Failed to create named pipe: {}", GetLastError()));
+            if handle.is_null() {
+                return Err(format!("Failed to create named pipe: {:?}", GetLastError()));
             }
 
             // In production, call ConnectNamedPipe here (blocking).
@@ -320,15 +320,15 @@ impl NamedPipe {
             let handle = CreateFileW(
                 PCWSTR(pipe_name.as_ptr()),
                 GENERIC_READ | GENERIC_WRITE,
-                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None,
                 OPEN_EXISTING,
                 0,
-                HANDLE(0),
+                None,
             );
 
-            if handle.0 == 0 {
-                return Err(format!("Failed to connect to named pipe: {}", GetLastError()));
+            if handle.is_null() {
+                return Err(format!("Failed to connect to named pipe: {:?}", GetLastError()));
             }
 
             Ok(Self {
@@ -349,16 +349,15 @@ impl NamedPipe {
             let mut bytes_written: u32 = 0;
             let result = WriteFile(
                 self.pipe_handle,
-                cmd.as_ptr() as *const c_void,
-                cmd.len() as u32,
-                &mut bytes_written,
+                Some(cmd),
+                Some(&mut bytes_written),
                 None,
             );
 
-            if result.as_bool() {
+            if result.into_ok().is_ok() {
                 Ok(())
             } else {
-                Err(format!("Failed to write to pipe: {}", GetLastError()))
+                Err(format!("Failed to write to pipe: {:?}", GetLastError()))
             }
         }
         #[cfg(not(windows))]
@@ -375,16 +374,15 @@ impl NamedPipe {
             let mut bytes_read: u32 = 0;
             let result = ReadFile(
                 self.pipe_handle,
-                buf.as_mut_ptr() as *mut c_void,
-                buf.len() as u32,
-                &mut bytes_read,
+                Some(buf),
+                Some(&mut bytes_read),
                 None,
             );
 
-            if result.as_bool() {
+            if result.into_ok().is_ok() {
                 Ok(bytes_read as usize)
             } else {
-                Err(format!("Failed to read from pipe: {}", GetLastError()))
+                Err(format!("Failed to read from pipe: {:?}", GetLastError()))
             }
         }
         #[cfg(not(windows))]
@@ -448,7 +446,7 @@ impl ControlCommand {
     /// Creates a new command.
     pub fn new(cmd: Command, payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::with_capacity(std::mem::size_of::<u32>() * 2 + payload.len());
-        buf.extend_from_slice(&cmd as *const Command as usize as u32); // Cast cmd to u32.
+        buf.extend_from_slice(&cmd as u32);
         buf.extend_from_slice(&(payload.len() as u32));
         buf.extend_from_slice(payload);
         buf

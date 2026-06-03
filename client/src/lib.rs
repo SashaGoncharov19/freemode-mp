@@ -23,6 +23,7 @@ mod network_client;
 use std::ptr;
 
 // Windows FFI.
+use windows_core::GUID;
 use windows::Win32::Foundation::{HANDLE, HMODULE, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
 use windows::Win32::Storage::FileSystem::CreateFileW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -113,7 +114,9 @@ static mut SHARED_CONTEXT_DATA: SharedContextData = SharedContextData {
     server_name: [0; 64],
 };
 
-type PCWSTR = *const u16;
+use std::os::windows::ffi::OsStrExt;
+
+type PCWSTR = windows_core::PCWSTR;
 
 // ============================================================================
 // DllMain entry point
@@ -166,7 +169,7 @@ unsafe fn _dll_detach() {
     // Cleanup DirectX 11 hooks.
     if let Some(ref mut hook) = G_D3D11_HOOK {
         hook.unhook_all();
-        hook.overlay_data.clear();
+        hook.overlay_shaders = None;
         hook.dirty = false;
     }
     G_D3D11_HOOK = None;
@@ -179,7 +182,7 @@ unsafe fn _dll_detach() {
     // Unmap shared context.
     if !SHARED_CONTEXT_PTR.is_null() {
         unsafe {
-            windows::Win32::Storage::FileSystem::UnmapViewOfFile(SHARED_CONTEXT_PTR as usize);
+            windows::Win32::Storage::FileSystem::UnmapViewOfFile(SHARED_CONTEXT_PTR as *const std::ffi::c_void);
         }
         SHARED_CONTEXT_PTR = ptr::null_mut();
     }
@@ -196,7 +199,7 @@ unsafe fn _dll_detach() {
 fn _initialize_shared_context() {
     use std::os::windows::ffi::OsStrExt;
 
-    let shm_name: Vec<u16> = OsStr::new("Global\\FreeModeShm")
+    let shm_name: Vec<u16> = std::ffi::OsStr::new("Global\\FreeModeShm")
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
@@ -204,19 +207,19 @@ fn _initialize_shared_context() {
     unsafe {
         // Create the shared memory mapping file.
         let h_map = windows::Win32::Storage::FileSystem::CreateFileMappingW(
-            HANDLE(-1isize as isize), // INVALID_HANDLE_VALUE
+            INVALID_HANDLE_VALUE,
             None,
             windows::Win32::Security::SECURITY_ATTRIBUTES {
                 nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
                 lpSecurityDescriptor: None,
-                bInheritHandle: false,
+                bInheritHandle: true,
             },
             0,
             MAX_SHARED_CTX_SIZE as u32,
             PCWSTR(shm_name.as_ptr()),
         );
 
-        if h_map.0 == 0 {
+        if h_map.is_null() {
             freemode_log::error!("Failed to create shared memory for launcher communication");
             return;
         }
@@ -255,13 +258,13 @@ pub extern "system" fn FreeModeClientInit() -> bool {
 /// Gets the shared context data pointer.
 #[no_mangle]
 pub extern "system" fn FreeModeGetSharedContext() -> *mut SharedContextData {
-    unsafe { SHARED_CONTEXT_PTR.cast_mut() }
+    unsafe { SHARED_CONTEXT_PTR.cast::<SharedContextData>() }
 }
 
 /// Returns the version of the client DLL as a null-terminated string.
 #[no_mangle]
 pub extern "system" fn FreeModeClientVersion() -> *const std::ffi::c_char {
-    b"0.1.0\0".as_ptr()
+    b"0.1.0\0".as_ptr() as *const std::ffi::c_char
 }
 
 /// Shuts down the client DLL.

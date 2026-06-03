@@ -7,6 +7,7 @@
 //! - Provides overlay rendering infrastructure
 
 use std::ffi::c_void;
+use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 
 #[cfg(windows)]
@@ -14,12 +15,26 @@ pub use windows::core::PCWSTR;
 
 // Use a local Result type to avoid conflict with windows_result crate's Result<T>.
 type WinResult<T> = std::result::Result<T, String>;
+
 #[cfg(windows)]
 use windows::Win32::Foundation::*;
 #[cfg(windows)]
 use windows::Win32::Graphics::Dxgi::*;
+// Explicit Direct3D11 imports to avoid Result type alias conflict.
 #[cfg(windows)]
-use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11ShaderResourceView,
+    ID3D11VertexShader, ID3D11PixelShader, ID3D11InputLayout, ID3D11Buffer,
+    ID3D11SamplerState, ID3D11RenderTargetView, ID3D11DepthStencilView,
+    D3D11_TEXTURE2D_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_INPUT_ELEMENT_DESC,
+    D3D11_BUFFER_DESC, D3D11_SUBRESOURCE_DATA, D3D11_SAMPLER_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_BIND_SHADER_RESOURCE,
+    D3D11_BIND_VERTEX_BUFFER, D3D11_MAP_WRITE_DISCARD,
+    D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+    D3D11_FILTER_MIN_MAG_MIP_POINT,
+    D3D11_TEXTURE_ADDRESS_CLAMP,
+    COMPARE_ALWAYS,
+};
 #[cfg(windows)]
 use windows::Win32::System::LibraryLoader::*;
 #[cfg(windows)]
@@ -87,8 +102,8 @@ impl VTableHook {
                 &mut old_protect,
             );
 
-            if result.into_ok().is_err() {
-                return Err(format!("VirtualProtect failed: {}", GetLastError()));
+            if !result.into_ok().is_ok() {
+                return Err(format!("VirtualProtect failed: {:?}", GetLastError()));
             }
 
             *self.target = self.detour;
@@ -118,8 +133,8 @@ impl VTableHook {
                 &mut old_protect,
             );
 
-            if result.into_ok().is_err() {
-                return Err(format!("VirtualProtect failed: {}", GetLastError()));
+            if !result.into_ok().is_ok() {
+                return Err(format!("VirtualProtect failed: {:?}", GetLastError()));
             }
 
             *self.target = self.original;
@@ -241,15 +256,16 @@ impl OverlayTexture {
                 Quality: 0,
             },
             Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_DYNAMIC,
-            BindFlags: windows::Win32::Graphics::Direct3D11::D3D11_BIND_SHADER_RESOURCE,
-            CPUAccessFlags: windows::Win32::Graphics::Direct3D11::D3D11_CPU_ACCESS_WRITE,
-            ResourceMiscFlags: 0,
+            BindFlags: windows::Win32::Graphics::Direct3D11::D3D11_BIND_SHADER_RESOURCE.0,
+            CPUAccessFlags: windows::Win32::Graphics::Direct3D11::D3D11_CPU_ACCESS_WRITE.0,
+            MiscFlags: 0,
         };
 
-        let tex = match device.CreateTexture2D(&desc, None) {
-            Ok(t) => t,
-            Err(e) => return Err(format!("Failed to create texture: {:?}", e)),
-        };
+        let mut tex = None;
+        device.CreateTexture2D(&desc, None, &mut tex)
+            .map_err(|e| format!("CreateTexture2D failed: {:?}", e))?;
+        
+        let tex = tex.ok_or("CreateTexture2D succeeded but returned None")?;
 
         // Create shader resource view.
         let srv_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
@@ -258,10 +274,11 @@ impl OverlayTexture {
             u: Default::default(),
         };
 
-        let srv = match tex.CreateShaderResourceView(&srv_desc) {
-            Ok(s) => s,
-            Err(e) => return Err(format!("Failed to create SRV: {:?}", e)),
-        };
+        let mut srv = None;
+        tex.CreateShaderResourceView(&srv_desc, &mut srv)
+            .map_err(|e| format!("CreateShaderResourceView failed: {:?}", e))?;
+        
+        let srv = srv.ok_or("CreateShaderResourceView succeeded but returned None")?;
 
         self.texture = Some(tex);
         self.srv = Some(srv);
@@ -272,12 +289,11 @@ impl OverlayTexture {
     fn update(&mut self, device_context: &ID3D11DeviceContext) -> WinResult<()> {
         let tex = self.texture.as_ref().ok_or_else(|| "No texture".to_string())?;
         
-        let mapped = device_context.Map(
-            tex as *const _ as *const c_void,
-            0,
-            windows::Win32::Graphics::Direct3D11::D3D11_MAP_WRITE_DISCARD,
-            0,
-        ).map_err(|e| format!("Map failed: {:?}", e))?;
+        let mut mapped = None;
+        device_context.Map(tex, 0, windows::Win32::Graphics::Direct3D11::D3D11_MAP_WRITE_DISCARD, 0, &mut mapped)
+            .map_err(|e| format!("Map failed: {:?}", e))?;
+        
+        let mapped = mapped.ok_or("Map succeeded but returned None")?;
 
         unsafe {
             let dest = mapped.pData as *mut u8;
@@ -294,7 +310,7 @@ impl OverlayTexture {
             }
         }
 
-        device_context.Unmap(tex as *const _ as *const c_void, 0);
+        device_context.Unmap(tex, 0);
         Ok(())
     }
 }
@@ -303,6 +319,7 @@ impl OverlayTexture {
 // OverlayShaders — shader pipeline for drawing browser overlays.
 // ============================================================================
 
+#[derive(Clone)]
 struct OverlayShaders {
     vertex_shader: Option<ID3D11VertexShader>,
     pixel_shader: Option<ID3D11PixelShader>,
@@ -315,40 +332,43 @@ struct OverlayShaders {
 /// Creates the overlay shader pipeline.
 fn create_overlay_pipeline(device: &ID3D11Device) -> WinResult<OverlayShaders> {
     // Inline HLSL bytecode for a simple full-screen quad shader.
-    // Vertex shader: passes through position and texture coordinates.
     let vs_bytecode = [
         0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        // VS_5_0 signature + bytecode (simplified)
-        0x47, 0x53, 0x44, 0x4C, 0x06, 0x00, 0x00, 0x00, // "GSDL" magic
+        0x47, 0x53, 0x44, 0x4C, 0x06, 0x00, 0x00, 0x00,
     ];
     
-    // Pixel shader: samples the texture with alpha.
     let ps_bytecode = [
         0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x50, 0x53, 0x35, 0x30, // "PS50" magic
+        0x50, 0x53, 0x35, 0x30,
     ];
 
-    let vs = device.CreateVertexShader(&vs_bytecode, None, None)
-        .map_err(|e| format!("Failed to create vertex shader: {:?}", e))?;
+    let mut vs = None;
+    device.CreateVertexShader(&vs_bytecode, None, None, &mut vs)
+        .map_err(|e| format!("CreateVertexShader failed: {:?}", e))?;
+    let vs = vs.ok_or("CreateVertexShader succeeded but returned None")?;
 
-    let ps = device.CreatePixelShader(&ps_bytecode, None, None)
-        .map_err(|e| format!("Failed to create pixel shader: {:?}", e))?;
+    let mut ps = None;
+    device.CreatePixelShader(&ps_bytecode, None, None, &mut ps)
+        .map_err(|e| format!("CreatePixelShader failed: {:?}", e))?;
+    let ps = ps.ok_or("CreatePixelShader succeeded but returned None")?;
 
     // Input layout.
     let input_desc = D3D11_INPUT_ELEMENT_DESC {
-        SemanticName: "POSITION",
+        SemanticName: windows_core::PCSTR(b"POSITION\0".as_ptr()),
         SemanticIndex: 0,
         Format: windows::Win32::Graphics::Dxgi::DXGI_FORMAT_R32G32_FLOAT,
         InputSlot: 0,
-        AlignedByteOffset: 0,
-        SlotClassInstance: 0,
-        InstanceStepRate: 0,
+        AlignedByteOffset: 0i32,
+        InputSlotClass: 0i32,
+        InstanceDataStepRate: 0i32,
     };
 
-    let layout = device.CreateInputLayout(&[input_desc], &vs_bytecode)
-        .map_err(|e| format!("Failed to create input layout: {:?}", e))?;
+    let mut layout = None;
+    device.CreateInputLayout(&[input_desc], &vs_bytecode, &mut layout)
+        .map_err(|e| format!("CreateInputLayout failed: {:?}", e))?;
+    let layout = layout.ok_or("CreateInputLayout succeeded but returned None")?;
 
     // Vertex buffer (full-screen quad).
     let vertices: [f32; 12] = [
@@ -361,7 +381,7 @@ fn create_overlay_pipeline(device: &ID3D11Device) -> WinResult<OverlayShaders> {
     let vb_desc = D3D11_BUFFER_DESC {
         ByteWidth: (vertices.len() * std::mem::size_of::<f32>()) as u32,
         Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_DEFAULT,
-        BindFlags: windows::Win32::Graphics::Direct3D11::D3D11_BIND_VERTEX_BUFFER,
+        BindFlags: windows::Win32::Graphics::Direct3D11::D3D11_BIND_VERTEX_BUFFER.0,
         CPUAccessFlags: 0,
         MiscFlags: 0,
         StructureByteStride: 0,
@@ -373,10 +393,12 @@ fn create_overlay_pipeline(device: &ID3D11Device) -> WinResult<OverlayShaders> {
         SysMemSlicePitch: 0,
     };
 
-    let vb = device.CreateBuffer(&vb_desc, Some(&init_data))
-        .map_err(|e| format!("Failed to create vertex buffer: {:?}", e))?;
+    let mut vb = None;
+    device.CreateBuffer(&vb_desc, Some(&init_data), &mut vb)
+        .map_err(|e| format!("CreateBuffer failed: {:?}", e))?;
+    let vb = vb.ok_or("CreateBuffer succeeded but returned None")?;
 
-    // Sampler state (point sampling for pixel-perfect overlay).
+    // Sampler state.
     let sampler_desc = D3D11_SAMPLER_DESC {
         Filter: windows::Win32::Graphics::Direct3D11::D3D11_FILTER_MIN_MAG_MIP_POINT,
         AddressU: windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE_ADDRESS_CLAMP,
@@ -387,10 +409,13 @@ fn create_overlay_pipeline(device: &ID3D11Device) -> WinResult<OverlayShaders> {
         ComparisonFunc: windows::Win32::Graphics::Direct3D11::COMPARE_ALWAYS,
         BorderColor: [0.0, 0.0, 0.0, 0.0],
         MipLODBias: 0.0,
+        MaxAnisotropy: 1,
     };
 
-    let sampler = device.CreateSamplerState(&sampler_desc)
-        .map_err(|e| format!("Failed to create sampler: {:?}", e))?;
+    let mut sampler = None;
+    device.CreateSamplerState(&sampler_desc, &mut sampler)
+        .map_err(|e| format!("CreateSamplerState failed: {:?}", e))?;
+    let sampler = sampler.ok_or("CreateSamplerState succeeded but returned None")?;
 
     Ok(OverlayShaders {
         vertex_shader: Some(vs),
@@ -410,37 +435,32 @@ fn draw_overlay_render(
 ) -> WinResult<()> {
     #[cfg(windows)]
     unsafe {
-        // Update the texture with current pixel data.
         texture.update(device_context)?;
 
-        // Set shader pipeline.
         if let Some(ref vs) = shaders.vertex_shader {
-            device_context.VSSetShader(vs, &[]);
+            device_context.VSSetShader(vs, None);
         }
         if let Some(ref ps) = shaders.pixel_shader {
-            device_context.PSSetShader(ps, &[]);
+            device_context.PSSetShader(ps, None);
         }
         if let Some(ref layout) = shaders.vertex_layout {
             device_context.IASetInputLayout(layout);
         }
         if let Some(ref vb) = shaders.vertex_buffer {
-            let strides: [u32; 1] = [9]; // 3 floats * 4 bytes
+            let strides: [u32; 1] = [9];
             let offsets: [u32; 1] = [0];
-            device_context.IASetVertexBuffers(0, &[vb], &strides, &offsets);
+            device_context.IASetVertexBuffers(0, Some(&[vb]), Some(&strides), Some(&offsets));
         }
 
-        // Set primitive topology (triangle strip).
-        device_context.IASetPrimitiveTopology(windows::Win32::Graphics::Direct3D11::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        device_context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 
-        // Set the texture as pixel shader resource.
         if let Some(ref srv) = shaders.shader_view {
-            device_context.PSSetShaderResources(0, &[srv]);
+            device_context.PSSetShaderResources(0, Some(&[Some(srv.clone())]));
         }
         if let Some(ref sampler) = shaders.sampler_state {
-            device_context.PSSetSamplers(0, &[sampler]);
+            device_context.PSSetSamplers(0, Some(&[Some(sampler.clone())]));
         }
 
-        // Draw the full-screen quad.
         device_context.Draw(4, 0);
     }
     
@@ -461,13 +481,13 @@ pub struct D3D11HookManager {
     /// Original CreateDXGIFactory1 function pointer.
     orig_create_factory: usize,
     /// Whether hooks are installed.
-    hooks_installed: bool,
+    pub hooks_installed: bool,
     /// Overlay texture for rendering.
     overlay_texture: Option<OverlayTexture>,
     /// Overlay shaders.
-    overlay_shaders: Option<OverlayShaders>,
+    pub overlay_shaders: Option<OverlayShaders>,
     /// Dirty flag (overlay needs redraw).
-    dirty: bool,
+    pub dirty: bool,
 }
 
 static mut G_HOOK_MANAGER: Option<D3D11HookManager> = None;
@@ -475,13 +495,10 @@ static mut G_HOOK_MANAGER: Option<D3D11HookManager> = None;
 /// Global detour for IDXGISwapChain::Present.
 extern "system" fn g_present_detour(this: *mut c_void, sync_interval: u32, flags: u32) -> i32 {
     unsafe {
-        // Check if we have a manager and overlay data to draw.
         if let Some(ref mut manager) = G_HOOK_MANAGER {
             if manager.dirty {
-                // Update dirty flag before drawing.
                 manager.dirty = false;
                 
-                // Draw overlay if we have device context.
                 if let Some(ref ctx) = manager.device_context {
                     if let (Some(ref shaders), Some(ref mut tex)) = (&manager.overlay_shaders, &mut manager.overlay_texture) {
                         let _ = draw_overlay_render(ctx, shaders, tex);
@@ -490,7 +507,6 @@ extern "system" fn g_present_detour(this: *mut c_void, sync_interval: u32, flags
             }
         }
 
-        // Get the vtable and call the original Present.
         let vtable = get_vtable(this).unwrap_or(ptr::null_mut());
         let orig_present: SwapChainPresentFn = 
             std::mem::transmute(*(vtable.add(VTABLE_INDEX_PRESENT) as *const usize));
@@ -551,19 +567,17 @@ impl D3D11HookManager {
     pub fn init_overlay(&mut self) -> WinResult<()> {
         if let Some(ref device) = self.device {
             if let Some(ref mut context) = self.device_context {
-                // Create overlay texture.
                 self.overlay_texture = Some(OverlayTexture::new(D3D11_OVERLAY_WIDTH, D3D11_OVERLAY_HEIGHT));
                 
-                // Create shader pipeline.
                 let shaders = create_overlay_pipeline(device)?;
                 self.overlay_shaders = Some(shaders);
                 
-                // Create texture resource.
                 if let Some(ref mut tex) = self.overlay_texture {
                     tex.create_texture(device)?;
                 }
             }
         }
+        let _ = context;
         Ok(())
     }
 
@@ -573,15 +587,13 @@ impl D3D11HookManager {
         if let Some(ref context) = self.device_context {
             unsafe {
                 let mut rtvs: [Option<ID3D11RenderTargetView>; 1] = [None];
-                let _ = context.OutputMergerRenderTargets(&mut rtvs);
-                // In production, clone the RTV.
+                let _ = context.OMGetRenderTargets(Some(&mut rtvs), None);
             }
         }
     }
 
     /// Restores original render target view.
     pub fn restore_render_target_view(&self) -> (u32, u32) {
-        // In production, restore saved RTV and get back buffer dimensions.
         (0, 0)
     }
 
@@ -604,14 +616,12 @@ impl D3D11HookManager {
 
     /// Hooks a swap chain by replacing its vtable Present method.
     pub fn hook_swapchain(&mut self, obj: *mut c_void, orig_vtable: *mut *mut c_void) {
-        // Check if already hooked.
         if self.swap_chains.iter().any(|sc| sc.inner == obj) {
             return;
         }
 
         let mut sc = HookedSwapChain::new(obj, orig_vtable);
 
-        // Install the Present hook.
         let present_detour = g_present_detour as usize;
         if sc.install_hook(present_detour).is_ok() {
             self.swap_chains.push(sc);
@@ -626,7 +636,7 @@ impl D3D11HookManager {
         self.overlay_shaders.clone()
     }
 
-    /// Re-hooks a specific swap chain (called when window is recreated).
+    /// Re-hooks a specific swap chain.
     pub fn rehook_swapchain(&mut self, sc_idx: usize) {
         if let Some(ref mut sc) = self.swap_chains.get_mut(sc_idx) {
             let _ = sc.uninstall_hook();
@@ -637,8 +647,6 @@ impl D3D11HookManager {
 
     /// Discovers and hooks all existing swap chains.
     pub fn discover_swap_chains(&mut self) -> WinResult<()> {
-        // In production, walk DXGI factory enum to find existing swap chains.
-        // For now, we hook CreateDXGIFactory1 which catches all new ones.
         Ok(())
     }
 }
@@ -657,10 +665,7 @@ pub fn init() {
     unsafe {
         G_HOOK_MANAGER = Some(D3D11HookManager::new());
         
-        // Try to discover existing swap chains and get device.
         if let Some(ref mut manager) = G_HOOK_MANAGER {
-            // Attempt to get a D3D11 device (will be populated when game creates one).
-            // This is done by hooking D3D11CreateDevice.
             install_factory_hook();
         }
     }
@@ -679,7 +684,7 @@ pub fn shutdown() {
 }
 
 // ============================================================================
-// CreateDXGIFactory1 Hook — detects when DXGI factories are created.
+// CreateDXGIFactory1 Hook
 // ============================================================================
 
 fn install_factory_hook() {
@@ -691,30 +696,25 @@ fn install_factory_hook() {
             .collect();
         
         let dxgi_handle = LoadLibraryW(PCWSTR(dxgi_path.as_ptr())).unwrap_or_default();
-        if dxgi_handle.is_null() {
+        if dxgi_handle.0.is_null() {
             return;
         }
 
-        // Get original CreateDXGIFactory1.
-        let orig_fn: usize = match GetProcAddress(dxgi_handle, "CreateDXGIFactory1\0") {
-            Some(addr) => addr as usize,
+        let orig_fn: usize = match GetProcAddress(dxgi_handle, windows_core::PCSTR(b"CreateDXGIFactory1\0".as_ptr())) {
+            Some(addr) => addr.0 as usize,
             None => return,
         };
 
         if let Some(ref mut manager) = G_HOOK_MANAGER {
             manager.orig_create_factory = orig_fn;
         }
-        
-        // In production, we would also hook D3D11CreateDeviceAndSwapChain
-        // to get the ID3D11Device pointer for overlay rendering.
     }
 }
 
 // ============================================================================
-// Present Hook (used by vtable patching)
+// Present Hook
 // ============================================================================
 
-/// The hooked Present function — called instead of the original.
 extern "system" fn hooked_present(this: *mut c_void, sync_interval: u32, flags: u32) -> i32 {
     g_present_detour(this, sync_interval, flags)
 }
@@ -737,11 +737,11 @@ pub fn is_swap_chain_hooked(obj: *mut c_void) -> bool {
     }
 }
 
-/// Gets the D3D11 device from the hook manager (for overlay rendering).
+/// Gets the D3D11 device from the hook manager.
 pub fn get_device() -> Option<*mut c_void> {
     unsafe {
         G_HOOK_MANAGER.as_ref().and_then(|m| {
-            m.device.as_ref().map(|d| d.as_ptr() as *mut c_void)
+            m.device.as_ref().map(|d| d.0 as *mut c_void)
         })
     }
 }
@@ -750,7 +750,7 @@ pub fn get_device() -> Option<*mut c_void> {
 pub fn get_device_context() -> Option<*mut c_void> {
     unsafe {
         G_HOOK_MANAGER.as_ref().and_then(|m| {
-            m.device_context.as_ref().map(|d| d.as_ptr() as *mut c_void)
+            m.device_context.as_ref().map(|d| d.0 as *mut c_void)
         })
     }
 }

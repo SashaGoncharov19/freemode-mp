@@ -399,7 +399,7 @@ pub fn inject_dll_from_launcher_folder(_gta5_process: HANDLE) -> windows_core::R
             None,
         )?;
         
-        if thread.is_null() {
+        if thread.0.is_null() {
             let _ = VirtualFreeEx(process, remote_path, 0, MEM_RELEASE);
             let _ = CloseHandle(process);
             return Err(windows_core::Error::from_win32());
