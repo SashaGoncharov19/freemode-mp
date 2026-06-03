@@ -48,6 +48,7 @@ use windows::Win32::Graphics::Direct3D::COMPARE_ALWAYS;
 use windows::Win32::Graphics::D3d11::D3D11_SRV_DIMENSION_TEXTURE2D;
 #[cfg(windows)]
 use windows::Win32::System::LibraryLoader::*;
+// PAGE_EXECUTE_READWRITE constant for memory protection
 #[cfg(windows)]
 use windows::Win32::Security::PAGE_EXECUTE_READWRITE;
 
