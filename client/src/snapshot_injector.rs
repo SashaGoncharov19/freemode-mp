@@ -1,7 +1,6 @@
 //! Snapshot Injector — VEH-based process injection (FiveM-style).
 
 use std::ptr;
-#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 
 #[cfg(windows)]
@@ -10,6 +9,10 @@ pub use windows::Win32::Foundation::*;
 pub use windows::Win32::System::LibraryLoader::*;
 #[cfg(windows)]
 pub use windows::Win32::System::Threading::*;
+#[cfg(windows)]
+use windows::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler;
+use windows_core::PCWSTR;
+use windows_core::PWSTR;
 
 const EXCEPTION_BREAKPOINT: u32 = 0x8000_0002;
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
@@ -34,7 +37,7 @@ impl SnapshotInjector {
     pub fn initialize(&mut self, _exe_path: &str) -> std::result::Result<(), String> {
         #[cfg(windows)]
         unsafe {
-            let startup_info = STARTUPINFOW {
+            let mut startup_info = STARTUPINFOW {
                 cb: std::mem::size_of::<STARTUPINFOW>() as u32,
                 ..std::mem::zeroed()
             };
@@ -45,18 +48,22 @@ impl SnapshotInjector {
                 dwThreadId: 0,
             };
 
-            let wide_path: Vec<u16> = _exe_path.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut wide_path: Vec<u16> = std::ffi::OsStr::new(_exe_path)
+                .encode_wide()
+                .chain(std::iter::once(0u16))
+                .collect();
+            
             let result = CreateProcessW(
-                PCWSTR(ptr::null()),
-                PCWSTR(wide_path.as_ptr() as *mut u16),
+                None,
+                PWSTR(wide_path.as_mut_ptr()),
                 None,
                 None,
                 false,
                 CREATE_SUSPENDED,
                 None,
                 None,
-                &mut startup_info as *mut _,
-                &mut process_info as *mut _,
+                &mut startup_info,
+                &mut process_info,
             );
 
             if !result.is_ok() {
@@ -117,7 +124,7 @@ impl SnapshotInjector {
 
 impl Drop for SnapshotInjector {
     fn drop(&mut self) {
-        if !self.process_handle.is_null() {
+        if !self.process_handle.is_invalid() {
             #[cfg(windows)]
             unsafe { let _ = TerminateProcess(self.process_handle, 0); }
         }

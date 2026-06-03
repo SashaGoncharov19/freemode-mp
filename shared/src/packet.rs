@@ -146,14 +146,17 @@ impl SharedPacket {
     }
 
     /// Serializes a typed value into the packet payload using bincode.
-    pub fn from_typed<T: Serialize>(category: PacketCategory, msg_type: u8, value: &T) -> Result<Self, PacketError> {
-        let payload = bincode::serialize(value).map_err(|e| PacketError::SerializationError(e.to_string()))?;
+    pub fn from_typed<T: ?Sized + Serialize>(category: PacketCategory, msg_type: u8, value: &T) -> Result<Self, PacketError> {
+        let payload = bincode::serde::encode_to_vec(value, bincode::config::standard())
+            .map_err(|e| PacketError::SerializationError(e.to_string()))?;
         Ok(Self::with_payload(category, msg_type, payload))
     }
 
     /// Deserializes the packet payload into a typed value using bincode.
     pub fn to_typed<T: for<'de> Deserialize<'de>>(&self) -> Result<T, PacketError> {
-        bincode::deserialize(&self.payload).map_err(|e| PacketError::DeserializationError(e.to_string()))
+        let (value, _): (_, usize) = bincode::serde::decode_from_slice(&self.payload, bincode::config::standard())
+            .map_err(|e| PacketError::DeserializationError(e.to_string()))?;
+        Ok(value)
     }
 }
 

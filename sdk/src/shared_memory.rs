@@ -12,7 +12,7 @@ mod sys {
     pub const SHARED_DATA_PREFIX: &str = "CFX_";
     pub const SHARED_DATA_SUFFIX: &str = "_SharedData_";
 
-    extern "system" {
+    unsafe extern "system" {
         fn CreateFileMappingW(
             hfile: isize,
             lpAttributes: *mut core::ffi::c_void,

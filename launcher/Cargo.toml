@@ -6,24 +6,28 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "freemode-launcher"
+path = "src/main.rs"
+
 [dependencies]
-freemode-sdk = { path = "../sdk" }
-freemode-shared = { path = "../shared" }
 freemode-log = { path = "../log" }
-serde.workspace = true
-serde_json.workspace = true
-bytemuck.workspace = true
-env_logger = "0.11"
-dirs = "6"
-windows = { workspace = true, features = [
+freemode-sdk = { path = "../sdk" }
+egui = "0.29"
+eframe = { version = "0.29", features = ["glow"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
-    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_Kernel",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
-    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
-    "Win32_UI_Shell",
-] }
+]}
+windows-core = "0.58"
