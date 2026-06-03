@@ -58,7 +58,7 @@ pub struct FrameMeta {
     pub frame_seq: u64,
     /// Timestamp in microseconds.
     pub timestamp_us: u64,
-    /// Whether this is a dirty frame (only sent when content changes).
+    /// Whether this is a dirty frames (only sent when content changes).
     pub dirty: bool,
     /// Padding to reach 64 bytes.
     _padding: [u8; 24],
@@ -120,7 +120,7 @@ impl SharedMemory {
     pub fn create(width: u32, height: u32) -> Result<Self, String> {
         #[cfg(windows)]
         unsafe {
-            let required_size = ((width as usize) * (height as usize) * 4); // BGRA.
+            let required_size = (width as usize) * (height as usize) * 4; // BGRA.
             
             // Create the shared memory section.
             let handle = CreateFileMappingW(
@@ -132,7 +132,7 @@ impl SharedMemory {
                 PCWSTR(SHM_PIXEL_DATA_NAME.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>().as_ptr()),
             );
 
-            if handle.is_null() {
+            if handle.0.is_null() {
                 return Err(format!("Failed to create shared memory: {:?}", GetLastError()));
             }
 
@@ -178,7 +178,7 @@ impl SharedMemory {
                 PCWSTR(SHM_PIXEL_DATA_NAME.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>().as_ptr()),
             );
 
-            if handle.is_null() {
+            if handle.0.is_null() {
                 return Err(format!("Failed to open shared memory: {:?}", GetLastError()));
             }
 
@@ -293,7 +293,7 @@ impl NamedPipe {
                 None,
             );
 
-            if handle.is_null() {
+            if handle.0.is_null() {
                 return Err(format!("Failed to create named pipe: {:?}", GetLastError()));
             }
 
@@ -323,11 +323,11 @@ impl NamedPipe {
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None,
                 OPEN_EXISTING,
-                0,
+                FILE_ATTRIBUTE_NORMAL,
                 None,
             );
 
-            if handle.is_null() {
+            if handle.0.is_null() {
                 return Err(format!("Failed to connect to named pipe: {:?}", GetLastError()));
             }
 
@@ -354,7 +354,7 @@ impl NamedPipe {
                 None,
             );
 
-            if result.into_ok().is_ok() {
+            if result.ok().is_ok() {
                 Ok(())
             } else {
                 Err(format!("Failed to write to pipe: {:?}", GetLastError()))
@@ -379,7 +379,7 @@ impl NamedPipe {
                 None,
             );
 
-            if result.into_ok().is_ok() {
+            if result.ok().is_ok() {
                 Ok(bytes_read as usize)
             } else {
                 Err(format!("Failed to read from pipe: {:?}", GetLastError()))
@@ -446,8 +446,8 @@ impl ControlCommand {
     /// Creates a new command.
     pub fn new(cmd: Command, payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::with_capacity(std::mem::size_of::<u32>() * 2 + payload.len());
-        buf.extend_from_slice(&cmd as u32);
-        buf.extend_from_slice(&(payload.len() as u32));
+        buf.extend_from_slice(&[cmd as u32]);
+        buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         buf.extend_from_slice(payload);
         buf
     }

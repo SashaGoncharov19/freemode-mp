@@ -280,7 +280,7 @@ impl ExecutableLoader {
             while offset < reloc_dir.size as usize {
                 let block_header_ptr = reloc_base.add(offset) as *const u8;
                 let block_size = *(block_header_ptr as *const u32);
-                let block_rva = *(block_header_ptr.add(4) as *const u32);
+                let _block_rva = *(block_header_ptr.add(4) as *const u32);
                 
                 if block_size == 0 { break; }
                 
@@ -293,9 +293,9 @@ impl ExecutableLoader {
                     let offset_ = (entry & 0xFFF) as u32;
                     
                     if type_ == 3 {
-                        let addr_ptr = (base_addr + block_rva as usize + offset_ as usize) as *mut usize;
-                        let delta = self.module as usize - opt.image_base as usize;
-                        *addr_ptr = (*addr_ptr as isize + delta as isize) as usize;
+                        let addr_ptr = (base_addr + _block_rva as usize + offset_ as usize) as *mut isize;
+                        let delta = self.module as isize - opt.image_base as isize;
+                        *addr_ptr = (*addr_ptr as isize + delta) as usize as isize;
                     }
                 }
                 
@@ -397,7 +397,8 @@ impl ExecutableLoader {
                             let resolved = GetProcAddress(loaded_module, windows_core::PCSTR(func_name.as_ptr()));
                             if let Some(addr) = resolved {
                                 let iat_ptr = (base_addr + desc.first_thunk as usize + thunk_idx * std::mem::size_of::<ImageThunkData64>()) as *mut u64;
-                                *iat_ptr = addr.0 as u64;
+                                // GetProcAddress returns a pointer, cast to u64 properly
+                                *iat_ptr = addr as u64;
                             }
                         }
                     }
@@ -478,7 +479,7 @@ impl ExecutableLoader {
                 if sec.size_of_raw_data == 0 { continue; }
                 
                 let section_addr = (self.module as usize + sec.virtual_address as usize) as *mut u8;
-                let mut old_protect = 0u32;
+                let mut old_protect: u32 = 0;
                 
                 let desired_protection = if (sec.characteristics & 0x80000000) != 0 {
                     windows::Win32::Security::PAGE_EXECUTE_READWRITE

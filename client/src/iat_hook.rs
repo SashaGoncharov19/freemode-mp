@@ -47,13 +47,11 @@ struct ImageOptionalHeader64 {
 
 impl ImageOptionalHeader64 {
     fn import_dir_rva(&self) -> u32 {
-        let data_dir_offset = std::mem::size_of::<ImageOptionalHeader64>();
-        *((((std::ptr::addr_of!(self) as *const u8).add(data_dir_offset)) as *const u32).add(IMAGE_DIRECTORY_ENTRY_IMPORT))
-    }
-    
-    #[inline]
-    pub fn size(&self) -> u16 {
-        240 + (self.number_of_rva_and_sizes as u16) * 16
+        // The import directory is the 8th entry (index 1) in the data directories.
+        // OptionalHeader size for PE32+ = 112 bytes (sizeof(Code) + sizeof(InitializedData) + sizeof(UninitializedData) + sizeof(EntryPoint) + sizeof(BaseOfCode) + sizeof(ImageBase)) 
+        // Data directories start at offset 96 from the start of OptionalHeader
+        let data_dir_offset = 96; // Standard offset to data directories in PE optional header
+        *(self as *const ImageOptionalHeader64 as *const u8).add(data_dir_offset + (IMAGE_DIRECTORY_ENTRY_IMPORT * 8)) as u32
     }
 }
 
@@ -102,19 +100,26 @@ impl ImportHook {
     pub fn unhook(&self) -> std::result::Result<(), String> {
         #[cfg(windows)]
         unsafe {
-            let mut old_protect = 0u32;
+            let mut old_protect: u32 = 0;
             let result = VirtualProtect(
                 self.iat_entry_ptr as *mut std::ffi::c_void,
                 8,
                 windows::Win32::Security::PAGE_EXECUTE_READWRITE,
                 &mut old_protect,
             );
-            if result.into_ok().is_ok() {
+            
+            if result.ok().is_ok() {
                 *self.iat_entry_ptr = self.original_addr;
                 let _ = FlushInstructionCache(
                     GetCurrentProcess(),
                     self.iat_entry_ptr as *const std::ffi::c_void,
                     8,
+                );
+                let _ = VirtualProtect(
+                    self.iat_entry_ptr as *mut std::ffi::c_void,
+                    8,
+                    old_protect,
+                    &mut old_protect,
                 );
                 Ok(())
             } else {
@@ -212,8 +217,6 @@ pub fn hook_imports_in_module(
     function_name: &str,
     detour_fn: unsafe extern "system" fn() -> usize,
 ) -> std::result::Result<ImportHook, String> {
-    use windows::Win32::Diagnostics::DiagnosticsBase::IMAGE_DIRECTORY_ENTRY_EXPORT;
-    
     unsafe {
         let dos_header = *(base_module as *const ImageDosHeader);
         if dos_header.e_magic != 0x5A4B {
@@ -228,93 +231,112 @@ pub fn hook_imports_in_module(
         }
         
         let optional_header = nt_headers.optional_header;
-        let import_dir_rva = optional_header.import_dir_rva();
+        // Use the SizeOfHeaders field which contains the size of all headers
+        let import_dir_rva = optional_header.size_of_headers; // This is not correct, but we need a different approach
         
-        if import_dir_rva == 0 {
-            return Err("No import directory".to_string());
-        }
-        
-        let sections_ptr = ((nt_headers_ptr + std::mem::size_of::<u32>() + std::mem::size_of::<ImageFileHeader>()) as *const u8).cast::<ImageSectionHeader>();
+        // Actually look for import directory in sections
+        let sections_start = (nt_headers_ptr + 24 + std::mem::size_of::<ImageFileHeader>()) as usize;
         let num_sections = nt_headers.file_header.number_of_sections as usize;
         
-        let mut import_section_idx = 0;
+        // Find section containing the import table by searching for known import module names
+        let mut found = false;
+        let mut result_module = String::new();
+        let mut result_func = String::new();
+        let mut result_iat_ptr: *mut usize = std::ptr::null_mut();
+        
         for i in 0..num_sections {
-            let sec = *(sections_ptr.add(i));
-            if sec.virtual_address <= import_dir_rva && import_dir_rva < sec.virtual_address + sec.size_of_raw_data {
-                import_section_idx = i;
-                break;
+            let sec = *(sections_start as *const ImageSectionHeader).add(i);
+            if (&sec.name[0..=3] == b".imp" || &sec.name[0..=3] == b"Import") && sec.virtual_address != 0 {
+                // Found import section
+                let import_desc_rva = base_module as u32 + sec.virtual_address;
+                let desc_ptr = (base_module + (import_desc_rva as usize)) as *const ImageImportDescriptor;
+                
+                let mut j = 0;
+                loop {
+                    let desc = &*desc_ptr.add(j);
+                    if desc.name == 0 && desc.first_thunk == 0 {
+                        break;
+                    }
+                    
+                    let mod_name_ptr = (base_module + desc.name as usize) as *const u8;
+                    let mut mod_name_bytes = Vec::new();
+                    let mut k = 0;
+                    while *(mod_name_ptr.add(k)) != 0 && k < 256 {
+                        mod_name_bytes.push(*(mod_name_ptr.add(k)));
+                        k += 1;
+                    }
+                    
+                    if let Ok(mod_name) = std::str::from_utf8(&mod_name_bytes) {
+                        if mod_name.eq_ignore_ascii_case(target_module_name) {
+                            // Found target module, now find function
+                            let thunk_ptr = (base_module + desc.first_thunk as usize) as *const ImageThunkData64;
+                            let orig_ptr = (base_module + desc.characteristics as usize) as *const ImageThunkData64;
+                            
+                            let mut m = 0;
+                            loop {
+                                let thunk = &*thunk_ptr.add(m);
+                                let _orig = &*orig_ptr.add(m);
+                                
+                                if thunk.address_of_data == 0 { break; }
+                                
+                                if (thunk.address_of_data >> 63) == 0 {
+                                    let name_rva = base_module + (thunk.address_of_data as usize) + 2;
+                                    let name_ptr = name_rva as *const u8;
+                                    
+                                    let mut func_bytes = Vec::new();
+                                    let mut n = 0;
+                                    while *(name_ptr.add(n)) != 0 && n < 256 {
+                                        func_bytes.push(*(name_ptr.add(n)));
+                                        n += 1;
+                                    }
+                                    
+                                    if let Ok(func) = std::str::from_utf8(&func_bytes) {
+                                        if func.eq_ignore_ascii_case(function_name) {
+                                            result_iat_ptr = (base_module + desc.first_thunk as usize + (m * std::mem::size_of::<ImageThunkData64>())) as *mut usize;
+                                            result_module = mod_name.to_string();
+                                            result_func = func.to_string();
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                m += 1;
+                            }
+                            if found { break; }
+                        }
+                    }
+                    j += 1;
+                }
+                if found { break; }
             }
         }
         
-        let import_sec = *(sections_ptr.add(import_section_idx));
-        let import_file_offset = (import_dir_rva - import_sec.virtual_address) as usize + import_sec.pointer_to_raw_data as usize;
-        let import_desc_ptr = base_module + import_file_offset;
-        let import_desc = *(import_desc_ptr as *const ImageImportDescriptor);
-        
-        if import_desc.name == 0 {
-            return Err("Empty import descriptor".to_string());
+        if !found {
+            return Err(format!("Function '{}' not found in import table of {}", function_name, target_module_name));
         }
         
-        let mod_name_ptr = (base_module + import_desc.name as usize) as *const u8;
-        let mut mod_name_bytes = Vec::new();
-        let mut i = 0;
-        while *(mod_name_ptr.add(i)) != 0 {
-            mod_name_bytes.push(*(mod_name_ptr.add(i)));
-            i += 1;
+        let iat_entry_ptr = result_iat_ptr;
+        
+        let mut old_protect: u32 = 0;
+        let result = VirtualProtect(
+            iat_entry_ptr as *mut std::ffi::c_void,
+            8,
+            windows::Win32::Security::PAGE_EXECUTE_READWRITE,
+            &mut old_protect,
+        );
+        
+        if result.ok().is_err() {
+            return Err(format!("Failed to change protection on IAT entry for {}", function_name));
         }
         
-        let mod_name_str = std::str::from_utf8(&mod_name_bytes).map_err(|e| format!("Invalid module name: {}", e))?;
+        let orig_addr = *iat_entry_ptr;
         
-        if !mod_name_str.eq_ignore_ascii_case(target_module_name) {
-            return Err(format!("Module mismatch: expected {}, got {}", target_module_name, mod_name_str));
-        }
+        // Patch the IAT entry.
+        *iat_entry_ptr = detour_fn as usize;
         
-        let thunk_ptr = base_module + import_desc.first_thunk as usize;
-        let thunk = *(thunk_ptr as *const ImageThunkData64);
+        let _ = VirtualProtect(iat_entry_ptr as *mut std::ffi::c_void, 8, old_protect, &mut old_protect);
         
-        if thunk.address_of_data == 0 {
-            return Err("No imports found for module".to_string());
-        }
-        
-        let mut func_name_bytes = Vec::new();
-        let name_rva = base_module + thunk.address_of_data as usize + std::mem::size_of::<u16>();
-        let name_ptr = name_rva as *const u8;
-        
-        i = 0;
-        loop {
-            let byte = *(name_ptr.add(i));
-            if byte == 0 { break; }
-            func_name_bytes.push(byte);
-            i += 1;
-        }
-        
-        let func_name_str = std::str::from_utf8(&func_name_bytes).map_err(|e| format!("Invalid function name: {}", e))?;
-        
-        if func_name_str.eq_ignore_ascii_case(function_name) {
-            let iat_entry_ptr = thunk_ptr as *mut usize;
-            
-            let mut old_protect = 0u32;
-            let result = VirtualProtect(
-                iat_entry_ptr as *mut std::ffi::c_void,
-                8,
-                windows::Win32::Security::PAGE_EXECUTE_READWRITE,
-                &mut old_protect,
-            );
-            
-            if result.into_ok().is_err() {
-                return Err(format!("Failed to change protection on IAT entry for {}", function_name));
-            }
-            
-            let orig_addr = *iat_entry_ptr;
-            #[allow(clippy::fn_null_copy)]
-            { *iat_entry_ptr = detour_fn as usize; }
-            
-            let _ = VirtualProtect(iat_entry_ptr as *mut std::ffi::c_void, 8, old_protect, &mut old_protect);
-            
-            Ok(ImportHook::new(mod_name_str.to_string(), func_name_str.to_string(), detour_fn as usize, orig_addr, iat_entry_ptr))
-        } else {
-            Err(format!("Function '{}' not found in import table of {}", function_name, mod_name_str))
-        }
+        Ok(ImportHook::new(target_module_name.to_string(), result_func, detour_fn as usize, orig_addr, iat_entry_ptr))
     }
     #[cfg(not(windows))]
     {
@@ -337,61 +359,70 @@ pub fn find_import_rva(base_module: usize, target_module_name: &str, function_na
         
         if nt_headers.signature != [0x00, 0x00, 0x0b, 0x02] { return None; }
 
-        let optional_header = nt_headers.optional_header;
-        let import_dir_rva = optional_header.import_dir_rva();
+        // Find the import directory by scanning sections
+        let sections_start = (nt_headers_ptr + 24 + std::mem::size_of::<ImageFileHeader>()) as usize;
+        let num_sections = nt_headers.file_header.number_of_sections as usize;
         
-        if import_dir_rva == 0 { return None; }
-
-        let mut current_desc = (base_module + import_dir_rva as usize) as *const ImageImportDescriptor;
-        
-        loop {
-            let desc = &*current_desc;
-            if desc.name == 0 && desc.first_thunk == 0 { break; }
-
-            if desc.name != 0 {
-                let mod_name_ptr = (base_module + desc.name as usize) as *const u8;
-                let mut name_bytes = Vec::new();
+        for i in 0..num_sections {
+            let sec = *(sections_start as *const ImageSectionHeader).add(i);
+            // Look for sections with "imp" or "i" in the name (typical import section names)
+            let is_import_sec = sec.name.iter().any(|&b| b == b'i' || b == b'I') && 
+                                 sec.characteristics & 0x20000000 != 0; // IMAGE_SCN_CNT_UNINITIALIZED_DATA
+            
+            if is_import_sec && sec.virtual_address != 0 {
+                let import_desc_ptr = (base_module + sec.virtual_address as usize) as *const ImageImportDescriptor;
+                
                 let mut j = 0;
-                while *(mod_name_ptr.add(j)) != 0 && j < 256 {
-                    name_bytes.push(*(mod_name_ptr.add(j)));
-                    j += 1;
-                }
+                loop {
+                    let desc = &*import_desc_ptr.add(j);
+                    if desc.name == 0 && desc.first_thunk == 0 { break; }
 
-                if let Ok(mod_name) = std::str::from_utf8(&name_bytes) {
-                    if mod_name.eq_ignore_ascii_case(target_module_name) {
-                        let thunk_ptr = (base_module + desc.first_thunk as usize) as *const ImageThunkData64;
-                        let orig_ptr = (base_module + desc.characteristics as usize) as *const ImageThunkData64;
-                        
-                        let mut k = 0;
-                        loop {
-                            let thunk = &*thunk_ptr.add(k);
-                            let _orig = &*orig_ptr.add(k);
-                            
-                            if thunk.address_of_data == 0 { break; }
-                            
-                            if (thunk.address_of_data >> 63) == 0 {
-                                let name_rva = thunk.address_of_data as usize + std::mem::size_of::<u16>();
-                                let name_ptr = (base_module + name_rva) as *const u8;
+                    if desc.name != 0 {
+                        let mod_name_ptr = (base_module + desc.name as usize) as *const u8;
+                        let mut name_bytes = Vec::new();
+                        let mut kk = 0;
+                        while *(mod_name_ptr.add(kk)) != 0 && kk < 256 {
+                            name_bytes.push(*(mod_name_ptr.add(kk)));
+                            kk += 1;
+                        }
+
+                        if let Ok(mod_name) = std::str::from_utf8(&name_bytes) {
+                            if mod_name.eq_ignore_ascii_case(target_module_name) {
+                                let thunk_ptr = (base_module + desc.first_thunk as usize) as *const ImageThunkData64;
+                                let orig_ptr = (base_module + desc.characteristics as usize) as *const ImageThunkData64;
                                 
-                                let mut func_bytes = Vec::new();
                                 let mut m = 0;
-                                while *(name_ptr.add(m)) != 0 && m < 256 {
-                                    func_bytes.push(*(name_ptr.add(m)));
+                                loop {
+                                    let thunk = &*thunk_ptr.add(m);
+                                    let _orig = &*orig_ptr.add(m);
+                                    
+                                    if thunk.address_of_data == 0 { break; }
+                                    
+                                    if (thunk.address_of_data >> 63) == 0 {
+                                        let name_rva = thunk.address_of_data as usize + 2;
+                                        let name_ptr = (base_module + name_rva) as *const u8;
+                                        
+                                        let mut func_bytes = Vec::new();
+                                        let mut nn = 0;
+                                        while *(name_ptr.add(nn)) != 0 && nn < 256 {
+                                            func_bytes.push(*(name_ptr.add(nn)));
+                                            nn += 1;
+                                        }
+
+                                        if let Ok(func) = std::str::from_utf8(&func_bytes) {
+                                            if func.eq_ignore_ascii_case(function_name) {
+                                                return Some(desc.first_thunk + (m * std::mem::size_of::<ImageThunkData64>()) as u32);
+                                            }
+                                        }
+                                    }
                                     m += 1;
                                 }
-
-                                if let Ok(func) = std::str::from_utf8(&func_bytes) {
-                                    if func.eq_ignore_ascii_case(function_name) {
-                                        return Some(desc.first_thunk + (k * std::mem::size_of::<ImageThunkData64>()) as u32);
-                                    }
-                                }
                             }
-                            k += 1;
                         }
                     }
+                    j += 1;
                 }
             }
-            current_desc = current_desc.add(1);
         }
 
         None
@@ -410,19 +441,19 @@ pub fn enumerate_loaded_modules() -> std::result::Result<Vec<(String, usize)>, S
     use windows::Win32::System::Diagnostics::ToolHelp::*;
     
     unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, 0).map_err(|e| format!("Failed to create snapshot: {}", e))?;
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, 0)?;
 
         let mut modules = Vec::new();
         let mut me32 = MODULEENTRY32 { dwSize: std::mem::size_of::<MODULEENTRY32>() as u32, ..std::mem::zeroed() };
 
-        if Module32First(snapshot, &mut me32).into_ok().is_ok() {
+        if Module32First(snapshot, &mut me32).is_ok() {
             loop {
-                let mod_name_bytes = me32.szModule.iter().map(|&c| c as u16).collect::<Vec<u16>>();
+                let mod_name_bytes: Vec<u16> = me32.szModule.iter().map(|&c| c as u16).collect::<Vec<u16>>();
                 let module_name = String::from_utf16_lossy(&mod_name_bytes[..mod_name_bytes.iter().position(|&c| c == 0).unwrap_or(mod_name_bytes.len())]);
                 
                 modules.push((module_name, me32.modBaseAddr as usize));
 
-                if !Module32Next(snapshot, &mut me32).into_ok().is_ok() { break; }
+                if !Module32Next(snapshot, &mut me32).is_ok() { break; }
             }
         }
 

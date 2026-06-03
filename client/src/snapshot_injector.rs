@@ -27,7 +27,7 @@ pub struct SnapshotInjector {
 impl SnapshotInjector {
     pub fn new() -> Self {
         Self {
-            process_handle: HANDLE(ptr::null_mut()),
+            process_handle: INVALID_HANDLE_VALUE,
             process_id: 0,
             veh_installed: false,
         }
@@ -61,7 +61,7 @@ impl SnapshotInjector {
                 &mut process_info as *mut _,
             );
             
-            if !result.into_ok().is_ok() {
+            if !result.ok().is_ok() {
                 return Err(format!("CreateProcessW failed"));
             }
             
@@ -119,7 +119,7 @@ impl SnapshotInjector {
 
 impl Drop for SnapshotInjector {
     fn drop(&mut self) {
-        if !self.process_handle.is_null() {
+        if !self.process_handle.0.is_null() {
             #[cfg(windows)]
             unsafe { let _ = TerminateProcess(self.process_handle, 0); }
         }
@@ -127,7 +127,7 @@ impl Drop for SnapshotInjector {
 }
 
 #[cfg(windows)]
-extern "system" fn snapshot_veh_handler(_exception_info: *mut ExceptionPointers) -> i32 {
+extern "system" fn snapshot_veh_handler(_exception_info: *mut EXCEPTION_POINTERS) -> i32 {
     EXCEPTION_CONTINUE_EXECUTION
 }
 

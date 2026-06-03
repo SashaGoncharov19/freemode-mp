@@ -246,7 +246,7 @@ pub fn install_veh_handler() -> usize {
 /// Removes a previously installed VEH handler.
 #[cfg(windows)]
 pub fn remove_veh_handler(cookie: usize) {
-    unsafe { RemoveVectoredExceptionHandler(cookie as *mut c_void); }
+    unsafe { RemoveVectoredExceptionHandler(std::mem::transmute(cookie)); }
 }
 
 /// VEH exception handler for snapshot injection.
@@ -312,11 +312,6 @@ pub fn execute_tls_callbacks(_base: usize) {
 
 #[cfg(windows)]
 mod ffi_helpers {
-    use windows::Win32::Foundation::*;
-    use windows::Win32::Storage::FileSystem::*;
-    use windows::Win32::System::LibraryLoader::*;
-    use std::ffi::c_void;
-
     pub const SECTION_ALL_ACCESS: u32 = 0x10000000;
     pub const GENERIC_READ: u32 = 0x80000000;
     pub const FILE_SHARE_READ: u32 = 0x00000001;
@@ -324,8 +319,6 @@ mod ffi_helpers {
     pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 
     pub use windows::Win32::System::Memory::{VirtualAlloc, MapViewOfFile, UnmapViewOfFile};
-    pub use windows::Win32::System::Threading::{AddVectoredExceptionHandler, RemoveVectoredExceptionHandler};
-    pub use windows::Win32::Storage::FileSystem::CreateFileW;
 }
 
 // ============================================================================

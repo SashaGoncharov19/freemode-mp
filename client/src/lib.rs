@@ -24,11 +24,22 @@ use std::ptr;
 
 // Windows FFI.
 use windows_core::GUID;
-use windows::Win32::Foundation::{HANDLE, HMODULE, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
+use windows::Win32::Foundation::{HANDLE, HMODULE};
 use windows::Win32::Storage::FileSystem::CreateFileW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::Storage::FileSystem::{MapViewOfFile, FILE_MAP_ALL_ACCESS};
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
+
+// DLL process attach/detach constants (available via Win32_Foundation feature).
+const DLL_PROCESS_ATTACH: u32 = 1;
+const DLL_PROCESS_DETACH: u32 = 0;
+
+// INVALID_HANDLE_VALUE constant for Windows.
+#[allow(dead_code)]
+const INVALID_HANDLE_VALUE: HANDLE = HANDLE(-1isize as isize);
+
+// TRUE constant for BOOL.
+const TRUE: i32 = 1;
 
 // ============================================================================
 // Constants
@@ -209,24 +220,24 @@ fn _initialize_shared_context() {
         let h_map = windows::Win32::Storage::FileSystem::CreateFileMappingW(
             INVALID_HANDLE_VALUE,
             None,
-            windows::Win32::Security::SECURITY_ATTRIBUTES {
-                nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: None,
-                bInheritHandle: true,
+            SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: ptr::null(),
+                bInheritHandle: TRUE != 0,
             },
             0,
             MAX_SHARED_CTX_SIZE as u32,
             PCWSTR(shm_name.as_ptr()),
         );
 
-        if h_map.is_null() {
+        if h_map.0.is_null() {
             freemode_log::error!("Failed to create shared memory for launcher communication");
             return;
         }
 
         let ptr = MapViewOfFile(
             h_map,
-            windows::Win32::Storage::FileSystem::FILE_MAP_ALL_ACCESS,
+            FILE_MAP_ALL_ACCESS,
             0,
             0,
             MAX_SHARED_CTX_SIZE,
@@ -290,7 +301,6 @@ fn str_to_pcw(s: &str) -> Vec<u16> {
 /// Gets the current process module base address.
 #[allow(dead_code)]
 fn get_module_base() -> *mut std::ffi::c_void {
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     unsafe {
         let name = str_to_pcw("GTA5.exe");
         let hmod = GetModuleHandleW(PCWSTR(name.as_ptr())).unwrap_or_default();

@@ -7,6 +7,7 @@
 //! - AddDllDirectory + SetDefaultDllDirectory for search order modification
 //! - Real IAT hooking via PE parsing (uses iat_hook module)
 
+#[cfg(windows)]
 mod iat_hook;
 
 use std::ptr;
@@ -339,16 +340,15 @@ fn hook_function(
         let iat_entry = (base_addr + rva as usize) as *mut usize;
 
         // Protect the IAT entry for writing.
-        let mut old_protect = 0u32;
-        use windows::Win32::Security::PAGE_EXECUTE_READWRITE;
+        let mut old_protect: u32 = 0;
         let result = windows::Win32::Foundation::VirtualProtect(
             iat_entry as *mut std::ffi::c_void,
             8,
-            PAGE_EXECUTE_READWRITE,
+            windows::Win32::Security::PAGE_EXECUTE_READWRITE,
             &mut old_protect,
         );
 
-        if !result.as_bool() {
+        if !result.ok().is_ok() {
             return Err(format!("Failed to change protection on IAT entry for {}", func_name));
         }
 
