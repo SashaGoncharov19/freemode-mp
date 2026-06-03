@@ -43,9 +43,9 @@ use windows::Win32::Graphics::Direct3D::{
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct3D::COMPARE_ALWAYS;
 
-// D3D11_SRV_DIMENSION_TEXTURE2D is from D3d11 module (shader resource view dimensions)
+// D3D11_SRV_DIMENSION_TEXTURE2D is from Direct3D11 module (shader resource view dimensions)
 #[cfg(windows)]
-use windows::Win32::Graphics::D3d11::D3D11_SRV_DIMENSION_TEXTURE2D;
+use windows::Win32::Graphics::Direct3D11::D3D11_SRV_DIMENSION_TEXTURE2D;
 #[cfg(windows)]
 use windows::Win32::System::LibraryLoader::*;
 // PAGE_EXECUTE_READWRITE constant for memory protection
